@@ -1086,6 +1086,20 @@ public class PreferencesHelper implements RankingConfig {
     public boolean createNotificationChannel(String pkg, int uid, NotificationChannel channel,
             boolean fromTargetApp, boolean hasDndAccess, int callingUid,
             boolean fromSystemOrSystemUi) {
+        return createNotificationChannel(pkg, uid, channel, fromTargetApp, hasDndAccess,
+                callingUid, fromSystemOrSystemUi, null);
+    }
+
+    boolean createNotificationChannelIfAbsentForDelegate(String pkg, int uid,
+            NotificationChannel channel, String delegatePkg, int delegateUid) {
+        return createNotificationChannel(pkg, uid, channel, true /* fromTargetApp */,
+                false /* hasDndAccess */, delegateUid, false /* fromSystemOrSystemUi */,
+                Objects.requireNonNull(delegatePkg));
+    }
+
+    private boolean createNotificationChannel(String pkg, int uid, NotificationChannel channel,
+            boolean fromTargetApp, boolean hasDndAccess, int callingUid,
+            boolean fromSystemOrSystemUi, @Nullable String delegatePkg) {
         Objects.requireNonNull(pkg);
         Objects.requireNonNull(channel);
         Objects.requireNonNull(channel.getId());
@@ -1095,7 +1109,19 @@ public class PreferencesHelper implements RankingConfig {
 
         boolean needsPolicyFileChange = false, wasUndeleted = false, needsDndChange = false;
         synchronized (mLock) {
-            PackagePreferences r = getOrCreatePackagePreferencesLocked(pkg, uid);
+            final PackagePreferences r;
+            if (delegatePkg != null) {
+                r = getPackagePreferencesLocked(pkg, uid);
+                if (r == null || !r.isValidDelegate(delegatePkg, callingUid)) {
+                    throw new SecurityException("Not the notification delegate for " + pkg);
+                }
+                // Count deleted channels too: provisioning must not undo a deletion.
+                if (r.channels.containsKey(channel.getId())) {
+                    return false;
+                }
+            } else {
+                r = getOrCreatePackagePreferencesLocked(pkg, uid);
+            }
             if (channel.getGroup() != null && !r.groups.containsKey(channel.getGroup())) {
                 throw new IllegalArgumentException("NotificationChannelGroup doesn't exist");
             }
@@ -1186,7 +1212,8 @@ public class PreferencesHelper implements RankingConfig {
 
                 // Reset fields that apps aren't allowed to set.
                 if (fromTargetApp && !hasDndAccess) {
-                    channel.setBypassDnd(r.priority == Notification.PRIORITY_MAX);
+                    channel.setBypassDnd(delegatePkg == null
+                            && r.priority == Notification.PRIORITY_MAX);
                 }
                 if (fromTargetApp) {
                     channel.setLockscreenVisibility(r.visibility);
@@ -2249,6 +2276,37 @@ public class PreferencesHelper implements RankingConfig {
             }
         }
         invalidateNotificationChannelCache();
+    }
+
+    enum DelegateChange {
+        REFUSED,
+        UNCHANGED,
+        CHANGED
+    }
+
+    DelegateChange setNotificationDelegateIfUnclaimed(String sourcePkg, int sourceUid,
+            String delegatePkg, int delegateUid, boolean enabled) {
+        synchronized (mLock) {
+            final PackagePreferences prefs = getPackagePreferencesLocked(sourcePkg, sourceUid);
+            final Delegate existing = prefs == null ? null : prefs.delegate;
+            if (existing == null) {
+                if (!enabled) {
+                    return DelegateChange.UNCHANGED;
+                }
+                getOrCreatePackagePreferencesLocked(sourcePkg, sourceUid).delegate =
+                        new Delegate(delegatePkg, delegateUid, true);
+            } else {
+                if (!delegatePkg.equals(existing.mPkg) || existing.mUid != delegateUid) {
+                    return DelegateChange.REFUSED;
+                }
+                if (existing.mEnabled == enabled) {
+                    return DelegateChange.UNCHANGED;
+                }
+                existing.mEnabled = enabled;
+            }
+        }
+        invalidateNotificationChannelCache();
+        return DelegateChange.CHANGED;
     }
 
     /**

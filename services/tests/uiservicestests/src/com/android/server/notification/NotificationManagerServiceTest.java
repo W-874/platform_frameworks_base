@@ -391,6 +391,10 @@ import platform.test.runner.parameterized.Parameters;
 public class NotificationManagerServiceTest extends UiServiceTestCase {
     private static final String TEST_CHANNEL_ID = "NotificationManagerServiceTestChannelId";
     private static final String PKG_NO_CHANNELS = "com.example.no.channels";
+    private static final String MIPUSH_FEATURE = "org.uwuaosp.feature.MIPUSH";
+    private static final String XMSF_PACKAGE = "com.xiaomi.xmsf";
+    private static final String MIPUSH_TARGET_PACKAGE = "com.example.mipush.target";
+    private static final String MIPUSH_CHANNEL_ID = "mipush_" + MIPUSH_TARGET_PACKAGE + "_default";
     private static final String MISSING_PACKAGE = "MISSING!";
     private static final int TEST_TASK_ID = 1;
     private static final int UID_HEADLESS = 1_000_000;
@@ -405,6 +409,10 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
     private static final String REDACTED_TEXT = "redacted text";
 
     private static final int MAX_CHANNELS_CREATED_BY_NLS_FOR_TESTING = 10;
+
+    private final int mMiPushTargetUid = UserHandle.getUid(mUserId,
+            UserHandle.getAppId(mUid) == Process.FIRST_APPLICATION_UID
+                    ? Process.FIRST_APPLICATION_UID + 1 : Process.FIRST_APPLICATION_UID);
 
     private final NotificationChannel mParentChannel =
             new NotificationChannel(PARENT_CHANNEL_ID, "parentName", IMPORTANCE_DEFAULT);
@@ -5771,6 +5779,200 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
 
         latch.await();
         verify(mAmi).hasForegroundServiceNotification(anyString(), anyInt(), anyString());
+    }
+
+    private ApplicationInfo setUpMiPushChannelCaller() throws RemoteException {
+        mService.setCallerIsNormalPackage();
+        when(mPmi.isSameApp(MIPUSH_TARGET_PACKAGE, 0L, mUid, mUserId)).thenReturn(false);
+        when(mPackageManagerClient.hasSystemFeature(MIPUSH_FEATURE)).thenReturn(true);
+        when(mPackageManager.getPackagesForUid(mUid)).thenReturn(new String[] {XMSF_PACKAGE});
+        ApplicationInfo xmsf = new ApplicationInfo();
+        xmsf.packageName = XMSF_PACKAGE;
+        xmsf.uid = mUid;
+        xmsf.flags = ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_INSTALLED;
+        when(mPackageManager.getApplicationInfo(eq(XMSF_PACKAGE), anyLong(), eq(mUserId)))
+                .thenReturn(xmsf);
+        when(mPackageManager.getPackageUid(eq(MIPUSH_TARGET_PACKAGE), anyLong(), eq(mUserId)))
+                .thenReturn(mMiPushTargetUid);
+        mService.mPreferencesHelper.setNotificationDelegate(MIPUSH_TARGET_PACKAGE,
+                mMiPushTargetUid, XMSF_PACKAGE, mUid);
+        return xmsf;
+    }
+
+    private ParceledListSlice<NotificationChannel> newMiPushChannelList() {
+        NotificationChannel channel = new NotificationChannel(MIPUSH_CHANNEL_ID, "Push channel",
+                IMPORTANCE_DEFAULT);
+        return new ParceledListSlice<>(List.of(channel));
+    }
+
+    private void assertMiPushChannelCreationDenied(int uid) {
+        assertThrows(SecurityException.class, () -> mBinderService.createNotificationChannels(
+                MIPUSH_TARGET_PACKAGE, newMiPushChannelList()));
+        assertThat(mService.mPreferencesHelper.getNotificationChannel(MIPUSH_TARGET_PACKAGE, uid,
+                MIPUSH_CHANNEL_ID, true)).isNull();
+    }
+
+    @Test
+    public void createNotificationChannels_miPushDelegateCreatesForTarget() throws Exception {
+        setUpMiPushChannelCaller();
+
+        mBinderService.createNotificationChannels(MIPUSH_TARGET_PACKAGE, newMiPushChannelList());
+
+        NotificationChannel channel = mService.mPreferencesHelper.getNotificationChannel(
+                MIPUSH_TARGET_PACKAGE, mMiPushTargetUid, MIPUSH_CHANNEL_ID, false);
+        assertThat(channel).isNotNull();
+        assertThat(channel.getImportance()).isEqualTo(IMPORTANCE_DEFAULT);
+        assertThat(mService.mPreferencesHelper.getNotificationChannel(MIPUSH_TARGET_PACKAGE, mUid,
+                MIPUSH_CHANNEL_ID, true)).isNull();
+    }
+
+    @Test
+    public void createNotificationChannels_miPushDelegatePreservesDisabledChannel()
+            throws Exception {
+        NotificationChannel disabled = new NotificationChannel(MIPUSH_CHANNEL_ID,
+                "Existing channel", IMPORTANCE_NONE);
+        mBinderService.createNotificationChannelsForPackage(MIPUSH_TARGET_PACKAGE, mMiPushTargetUid,
+                new ParceledListSlice<>(List.of(disabled)));
+        setUpMiPushChannelCaller();
+
+        mBinderService.createNotificationChannels(MIPUSH_TARGET_PACKAGE, newMiPushChannelList());
+
+        NotificationChannel channel = mService.mPreferencesHelper.getNotificationChannel(
+                MIPUSH_TARGET_PACKAGE, mMiPushTargetUid, MIPUSH_CHANNEL_ID, false);
+        assertThat(channel).isNotNull();
+        assertThat(channel.getImportance()).isEqualTo(IMPORTANCE_NONE);
+        assertThat(channel.getName().toString()).isEqualTo("Existing channel");
+    }
+
+    @Test
+    public void createNotificationChannels_miPushShellDoesNotOverwriteExistingChannel()
+            throws Exception {
+        NotificationChannel existing = new NotificationChannel(MIPUSH_CHANNEL_ID,
+                "Target's channel", NotificationManager.IMPORTANCE_HIGH);
+        existing.setDescription("Set by the target app");
+        mBinderService.createNotificationChannelsForPackage(MIPUSH_TARGET_PACKAGE, mMiPushTargetUid,
+                new ParceledListSlice<>(List.of(existing)));
+        setUpMiPushChannelCaller();
+
+        mBinderService.createNotificationChannels(MIPUSH_TARGET_PACKAGE, newMiPushChannelList());
+
+        NotificationChannel channel = mService.mPreferencesHelper.getNotificationChannel(
+                MIPUSH_TARGET_PACKAGE, mMiPushTargetUid, MIPUSH_CHANNEL_ID, false);
+        assertThat(channel).isNotNull();
+        assertThat(channel.getName().toString()).isEqualTo("Target's channel");
+        assertThat(channel.getDescription()).isEqualTo("Set by the target app");
+        assertThat(channel.getImportance()).isEqualTo(NotificationManager.IMPORTANCE_HIGH);
+    }
+
+    @Test
+    public void createNotificationChannels_miPushDelegatePreservesDeletedChannel()
+            throws Exception {
+        mBinderService.createNotificationChannelsForPackage(MIPUSH_TARGET_PACKAGE, mMiPushTargetUid,
+                newMiPushChannelList());
+        assertThat(mService.mPreferencesHelper.deleteNotificationChannel(MIPUSH_TARGET_PACKAGE,
+                mMiPushTargetUid, MIPUSH_CHANNEL_ID, mMiPushTargetUid, false)).isTrue();
+        setUpMiPushChannelCaller();
+
+        mBinderService.createNotificationChannels(MIPUSH_TARGET_PACKAGE, newMiPushChannelList());
+
+        NotificationChannel channel = mService.mPreferencesHelper.getNotificationChannel(
+                MIPUSH_TARGET_PACKAGE, mMiPushTargetUid, MIPUSH_CHANNEL_ID, true);
+        assertThat(channel).isNotNull();
+        assertThat(channel.isDeleted()).isTrue();
+    }
+
+    @Test
+    public void createNotificationChannels_miPushFeatureRequired() throws Exception {
+        setUpMiPushChannelCaller();
+        when(mPackageManagerClient.hasSystemFeature(MIPUSH_FEATURE)).thenReturn(false);
+
+        assertMiPushChannelCreationDenied(mMiPushTargetUid);
+    }
+
+    @Test
+    public void createNotificationChannels_miPushCallerMustOwnPackage() throws Exception {
+        setUpMiPushChannelCaller();
+        when(mPackageManager.getPackagesForUid(mUid)).thenReturn(new String[] {mPkg});
+
+        assertMiPushChannelCreationDenied(mMiPushTargetUid);
+    }
+
+    @Test
+    public void createNotificationChannels_miPushCallerMustBePreinstalled() throws Exception {
+        ApplicationInfo xmsf = setUpMiPushChannelCaller();
+        xmsf.flags &= ~ApplicationInfo.FLAG_SYSTEM;
+
+        assertMiPushChannelCreationDenied(mMiPushTargetUid);
+    }
+
+    @Test
+    public void createNotificationChannels_miPushDelegateMustBeEnabled() throws Exception {
+        setUpMiPushChannelCaller();
+        mService.mPreferencesHelper.revokeNotificationDelegate(MIPUSH_TARGET_PACKAGE,
+                mMiPushTargetUid);
+
+        assertMiPushChannelCreationDenied(mMiPushTargetUid);
+    }
+
+    @Test
+    public void createNotificationChannels_miPushTargetMustBeInCallerUser() throws Exception {
+        setUpMiPushChannelCaller();
+        int otherUserId = mUserId + 1;
+        int otherUserTargetUid = UserHandle.getUid(otherUserId,
+                UserHandle.getAppId(mMiPushTargetUid));
+        when(mPackageManager.getPackageUid(eq(MIPUSH_TARGET_PACKAGE), anyLong(), eq(mUserId)))
+                .thenReturn(otherUserTargetUid);
+        // Even an explicit delegate grant must not authorize a UID from another user.
+        mService.mPreferencesHelper.setNotificationDelegate(MIPUSH_TARGET_PACKAGE,
+                otherUserTargetUid, XMSF_PACKAGE, mUid);
+
+        assertMiPushChannelCreationDenied(otherUserTargetUid);
+    }
+
+    @Test
+    public void createNotificationChannels_miPushTargetMustResolveToAppUid() throws Exception {
+        setUpMiPushChannelCaller();
+        when(mPackageManager.getPackageUid(eq(MIPUSH_TARGET_PACKAGE), anyLong(), eq(mUserId)))
+                .thenReturn(INVALID_UID);
+
+        assertMiPushChannelCreationDenied(mMiPushTargetUid);
+    }
+
+    @Test
+    public void createNotificationChannels_sameAppDoesNotRequireMiPushDelegate() throws Exception {
+        mService.setCallerIsNormalPackage();
+        NotificationChannel channel = new NotificationChannel("app_created", "App channel",
+                IMPORTANCE_DEFAULT);
+
+        mBinderService.createNotificationChannels(mPkg, new ParceledListSlice<>(List.of(channel)));
+
+        assertThat(mService.mPreferencesHelper.getNotificationChannel(mPkg, mUid,
+                channel.getId(), false)).isNotNull();
+    }
+
+    @Test
+    public void createNotificationChannelsForPackage_miPushDelegateStillDenied()
+            throws Exception {
+        setUpMiPushChannelCaller();
+
+        assertThrows(SecurityException.class,
+                () -> mBinderService.createNotificationChannelsForPackage(
+                        MIPUSH_TARGET_PACKAGE, mMiPushTargetUid, newMiPushChannelList()));
+        assertThat(mService.mPreferencesHelper.getNotificationChannel(MIPUSH_TARGET_PACKAGE,
+                mMiPushTargetUid, MIPUSH_CHANNEL_ID, true)).isNull();
+    }
+
+    @Test
+    public void createNotificationChannelsForPackage_systemCallerDoesNotRequireMiPushDelegate()
+            throws Exception {
+        NotificationChannel channel = new NotificationChannel("system_created", "System channel",
+                IMPORTANCE_DEFAULT);
+
+        mBinderService.createNotificationChannelsForPackage(MIPUSH_TARGET_PACKAGE, mMiPushTargetUid,
+                new ParceledListSlice<>(List.of(channel)));
+
+        assertThat(mService.mPreferencesHelper.getNotificationChannel(MIPUSH_TARGET_PACKAGE,
+                mMiPushTargetUid, channel.getId(), false)).isNotNull();
     }
 
     @Test

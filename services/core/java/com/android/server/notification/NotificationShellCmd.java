@@ -72,6 +72,11 @@ public class NotificationShellCmd extends ShellCommand {
             + "  set_dnd [on|none (same as on)|priority|alarms|all|off (same as all)]\n"
             + "  allow_dnd PACKAGE [user_id (current user if not specified)]\n"
             + "  disallow_dnd PACKAGE [user_id (current user if not specified)]\n"
+            + "  allow_mipush PACKAGE\n"
+            + "    Allow preinstalled XMSF to post for PACKAGE in the current user (adb shell).\n"
+            + "    Does not replace a different notification delegate.\n"
+            + "  disallow_mipush PACKAGE\n"
+            + "    Revoke XMSF delegation for PACKAGE in the current user (adb shell).\n"
             + "  reset_assistant_user_set [user_id (current user if not specified)]\n"
             + "  get_approved_assistant [user_id (current user if not specified)]\n"
             + "  post [--help | flags] TAG TEXT\n"
@@ -167,8 +172,30 @@ public class NotificationShellCmd extends ShellCommand {
             return 255;
         }
 
+        final String normalizedCmd = cmd.replace('-', '_');
+        if ("allow_mipush".equals(normalizedCmd) || "disallow_mipush".equals(normalizedCmd)) {
+            if (callingUid != Process.SHELL_UID) {
+                getErrPrintWriter().println("error: this command requires the adb shell UID");
+                return 255;
+            }
+            final String packageName = getNextArg();
+            if (TextUtils.isEmpty(packageName) || packageName.startsWith("-")
+                    || peekNextArg() != null) {
+                getErrPrintWriter().println("usage: cmd notification " + normalizedCmd
+                        + " PACKAGE");
+                return 1;
+            }
+            if (!mDirectService.setMiPushNotificationDelegate(packageName,
+                    "allow_mipush".equals(normalizedCmd))) {
+                getErrPrintWriter().println("error: MiPush delegation change refused for "
+                        + packageName);
+                return 1;
+            }
+            return 0;
+        }
+
         try {
-            switch (cmd.replace('-', '_')) {
+            switch (normalizedCmd) {
                 case "set_dnd": {
                     String mode = getNextArgRequired();
                     int interruptionFilter = INTERRUPTION_FILTER_UNKNOWN;

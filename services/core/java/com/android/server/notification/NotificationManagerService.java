@@ -484,6 +484,13 @@ public class NotificationManagerService extends SystemService {
     public static final boolean ENABLE_CHILD_NOTIFICATIONS
             = SystemProperties.getBoolean("debug.child_notifs", true);
 
+    private static final String FEATURE_MIPUSH = "org.uwuaosp.feature.MIPUSH";
+    private static final String MIPUSH_PACKAGE = "com.xiaomi.xmsf";
+    private static final String MIPUSH_MESSAGE_HANDLER = "com.xiaomi.mipush.sdk.PushMessageHandler";
+    private static final String MIPUSH_MESSAGE_SERVICE = "com.xiaomi.mipush.sdk.MessageHandleService";
+    private static final long MATCH_MIPUSH_COMPONENTS =
+            MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE;
+
     // pullStats report request: undecorated remote view stats
     public static final int REPORT_REMOTE_VIEWS = 0x01;
 
@@ -5367,16 +5374,26 @@ public class NotificationManagerService extends SystemService {
 
         @Override
         public void createNotificationChannels(String pkg, ParceledListSlice channelsList) {
-            checkCallerIsSystemOrSameApp(pkg);
+            final int callingUid = Binder.getCallingUid();
+            try {
+                checkCallerIsSystemOrSameApp(pkg);
+            } catch (SecurityException notSameApp) {
+                final int targetUid = resolveMiPushChannelTargetUid(pkg, callingUid);
+                if (targetUid == INVALID_UID) {
+                    throw notSameApp;
+                }
+                createMiPushChannels(pkg, targetUid, callingUid, channelsList.getList());
+                return;
+            }
             int taskId = ActivityTaskManager.INVALID_TASK_ID;
             try {
                 int uid = mPackageManager.getPackageUid(pkg, 0,
-                        UserHandle.getUserId(Binder.getCallingUid()));
+                        UserHandle.getUserId(callingUid));
                 taskId = mAtm.getTaskToShowPermissionDialogOn(pkg, uid);
             } catch (RemoteException e) {
                 // Do nothing
             }
-            createNotificationChannelsImpl(pkg, Binder.getCallingUid(), channelsList, taskId);
+            createNotificationChannelsImpl(pkg, callingUid, channelsList, taskId);
         }
 
         @Override
@@ -5384,6 +5401,54 @@ public class NotificationManagerService extends SystemService {
                 ParceledListSlice channelsList) {
             enforceSystemOrSystemUI("only system can call this");
             createNotificationChannelsImpl(pkg, uid, channelsList);
+        }
+
+        private void createMiPushChannels(String pkg, int uid, int callingUid,
+                List<NotificationChannel> channels) {
+            final String prefix = "mipush_" + pkg + "_";
+            final Uri defaultSound = Settings.System.DEFAULT_NOTIFICATION_URI;
+            for (int i = 0; i < channels.size(); i++) {
+                final NotificationChannel channel = Objects.requireNonNull(channels.get(i));
+                final String id = channel.getId();
+                final Uri sound = channel.getSound();
+                if (id == null || !id.startsWith(prefix) || id.length() == prefix.length()
+                        || id.length() > NotificationChannel.MAX_TEXT_LENGTH
+                        || channel.getGroup() != null || channel.getParentChannelId() != null
+                        || channel.getConversationId() != null || channel.isBundleChannel()
+                        || TextUtils.isEmpty(channel.getName())
+                        || channel.getImportance() < IMPORTANCE_NONE
+                        || channel.getImportance() > NotificationManager.IMPORTANCE_HIGH
+                        || (sound != null && !defaultSound.equals(sound))) {
+                    throw new IllegalArgumentException("Invalid MiPush notification channel: " + id);
+                }
+            }
+
+            boolean needsPolicyFileChange = false;
+            try {
+                for (int i = 0; i < channels.size(); i++) {
+                    final NotificationChannel requested = channels.get(i);
+                    // Copy only app-facing fields; never accept caller-supplied policy state.
+                    final NotificationChannel channel = new NotificationChannel(requested.getId(),
+                            requested.getName(), requested.getImportance());
+                    channel.setDescription(requested.getDescription());
+                    channel.setSound(requested.getSound(), Notification.AUDIO_ATTRIBUTES_DEFAULT);
+                    channel.enableVibration(requested.shouldVibrate());
+                    channel.enableLights(requested.shouldShowLights());
+                    channel.setLightColor(requested.getLightColor());
+                    channel.setShowBadge(requested.canShowBadge());
+                    if (mPreferencesHelper.createNotificationChannelIfAbsentForDelegate(pkg, uid,
+                            channel, MIPUSH_PACKAGE, callingUid)) {
+                        needsPolicyFileChange = true;
+                        mListeners.notifyNotificationChannelChanged(pkg,
+                                UserHandle.getUserHandleForUid(uid), channel,
+                                NOTIFICATION_CHANNEL_OR_GROUP_ADDED);
+                    }
+                }
+            } finally {
+                if (needsPolicyFileChange) {
+                    handleSavePolicyFile();
+                }
+            }
         }
 
         @Override
@@ -13004,6 +13069,90 @@ public class NotificationManagerService extends SystemService {
                 delay += 20;
             }
         }
+    }
+
+    private int resolveMiPushChannelTargetUid(String pkg, int callingUid) {
+        final int userId = UserHandle.getUserId(callingUid);
+        if (!UserHandle.isApp(callingUid) || TextUtils.isEmpty(pkg) || MIPUSH_PACKAGE.equals(pkg)
+                || !mPackageManagerClient.hasSystemFeature(FEATURE_MIPUSH)) {
+            return INVALID_UID;
+        }
+        final long token = Binder.clearCallingIdentity();
+        try {
+            if (!isOnlyMiPushPackageForUid(callingUid)) {
+                return INVALID_UID;
+            }
+            final ApplicationInfo xmsf = getPreinstalledMiPushApp(userId);
+            if (xmsf == null || xmsf.uid != callingUid) {
+                return INVALID_UID;
+            }
+            final int uid = mPackageManager.getPackageUid(pkg, 0, userId);
+            if (uid != callingUid && UserHandle.isApp(uid) && UserHandle.getUserId(uid) == userId
+                    && mPreferencesHelper.isDelegateAllowed(pkg, uid, MIPUSH_PACKAGE, callingUid)) {
+                return uid;
+            }
+            return INVALID_UID;
+        } catch (RemoteException e) {
+            return INVALID_UID;
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private boolean isOnlyMiPushPackageForUid(int uid) throws RemoteException {
+        final String[] packages = mPackageManager.getPackagesForUid(uid);
+        // A shared UID cannot establish which package made a call.
+        return packages != null && packages.length == 1 && MIPUSH_PACKAGE.equals(packages[0]);
+    }
+
+    @Nullable
+    private ApplicationInfo getPreinstalledMiPushApp(int userId) throws RemoteException {
+        final ApplicationInfo app = mPackageManager.getApplicationInfo(MIPUSH_PACKAGE,
+                MATCH_MIPUSH_COMPONENTS, userId);
+        return app != null && app.isSystemApp() && (app.flags & ApplicationInfo.FLAG_INSTALLED) != 0
+                && UserHandle.isApp(app.uid) && UserHandle.getUserId(app.uid) == userId ? app : null;
+    }
+
+    // Called by the user-authorized adb shell command with its original Binder identity.
+    boolean setMiPushNotificationDelegate(String pkg, boolean enabled) {
+        if (Binder.getCallingUid() != Process.SHELL_UID || TextUtils.isEmpty(pkg)
+                || !mPackageManagerClient.hasSystemFeature(FEATURE_MIPUSH)) {
+            return false;
+        }
+        final long token = Binder.clearCallingIdentity();
+        try {
+            final int userId = ActivityManager.getCurrentUser();
+            final ApplicationInfo xmsf = getPreinstalledMiPushApp(userId);
+            if (xmsf == null || MIPUSH_PACKAGE.equals(pkg) || !isOnlyMiPushPackageForUid(xmsf.uid)) {
+                return false;
+            }
+            final ApplicationInfo target = mPackageManager.getApplicationInfo(pkg,
+                    MATCH_MIPUSH_COMPONENTS, userId);
+            if (target == null || target.isSystemApp() || target.isUpdatedSystemApp()
+                    || (target.flags & ApplicationInfo.FLAG_INSTALLED) == 0
+                    || !UserHandle.isApp(target.uid) || UserHandle.getUserId(target.uid) != userId
+                    || target.uid == xmsf.uid || !hasMiPushSdkServices(pkg, userId)) {
+                return false;
+            }
+            final PreferencesHelper.DelegateChange change =
+                    mPreferencesHelper.setNotificationDelegateIfUnclaimed(pkg, target.uid,
+                            MIPUSH_PACKAGE, xmsf.uid, enabled);
+            if (change == PreferencesHelper.DelegateChange.CHANGED) {
+                handleSavePolicyFile();
+            }
+            return change != PreferencesHelper.DelegateChange.REFUSED;
+        } catch (RemoteException e) {
+            return false;
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private boolean hasMiPushSdkServices(String pkg, int userId) throws RemoteException {
+        return mPackageManager.getServiceInfo(new ComponentName(pkg, MIPUSH_MESSAGE_HANDLER),
+                MATCH_MIPUSH_COMPONENTS, userId) != null
+                && mPackageManager.getServiceInfo(new ComponentName(pkg, MIPUSH_MESSAGE_SERVICE),
+                        MATCH_MIPUSH_COMPONENTS, userId) != null;
     }
 
     protected boolean isCallingUidSystem() {

@@ -57,6 +57,7 @@ public class FakeSensorManager extends SensorManager {
     private final FakeGenericSensor mFakeLightSensor;
     private final FakeGenericSensor mFakeLightSensor2;
     private final FakeGenericSensor mFakeTapSensor;
+    private final FakeGenericSensor mFakeAccelerometer;
     private final FakeGenericSensor[] mSensors;
 
     public FakeSensorManager(Context context) throws Exception {
@@ -72,7 +73,9 @@ public class FakeSensorManager extends SensorManager {
                 mFakeProximitySensor = new FakeProximitySensor(proxSensor),
                 mFakeLightSensor = new FakeGenericSensor(createSensor(Sensor.TYPE_LIGHT, null)),
                 mFakeTapSensor = new FakeGenericSensor(createSensor(99, TAP_SENSOR_TYPE)),
-                mFakeLightSensor2 = new FakeGenericSensor(createSensor(Sensor.TYPE_LIGHT, null))
+                mFakeLightSensor2 = new FakeGenericSensor(createSensor(Sensor.TYPE_LIGHT, null)),
+                mFakeAccelerometer = new FakeGenericSensor(
+                        createSensor(Sensor.TYPE_ACCELEROMETER, null))
         };
     }
 
@@ -90,6 +93,10 @@ public class FakeSensorManager extends SensorManager {
 
     public FakeGenericSensor getFakeTapSensor() {
         return mFakeTapSensor;
+    }
+
+    public FakeGenericSensor getFakeAccelerometer() {
+        return mFakeAccelerometer;
     }
 
     @Override

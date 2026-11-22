@@ -29,7 +29,7 @@ import java.util.function.Consumer;
 /** Confirms a pickup with a short, unbatched accelerometer sample on the main thread. */
 final class DozePickupTiltCheck {
     private static final String WAKE_LOCK_TAG = "DozePickupTiltCheck";
-    private static final long TIMEOUT_MS = 250;
+    private static final long TIMEOUT_MS = 500;
     private static final int SAMPLE_PERIOD_US = 20_000;
     private static final float MIN_MAGNITUDE_SQUARED = 7 * 7;
     private static final float MAX_MAGNITUDE_SQUARED = 13 * 13;

@@ -77,6 +77,7 @@ public class NotificationShellCmd extends ShellCommand {
             + "    Does not replace a different notification delegate.\n"
             + "  disallow_mipush PACKAGE\n"
             + "    Revoke XMSF delegation for PACKAGE in the current user (adb shell).\n"
+            + "    Also prevents automatic MiPush delegation, even before the first grant.\n"
             + "  reset_assistant_user_set [user_id (current user if not specified)]\n"
             + "  get_approved_assistant [user_id (current user if not specified)]\n"
             + "  post [--help | flags] TAG TEXT\n"

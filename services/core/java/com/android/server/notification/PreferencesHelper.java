@@ -2278,6 +2278,12 @@ public class PreferencesHelper implements RankingConfig {
         invalidateNotificationChannelCache();
     }
 
+    enum DelegateMode {
+        AUTO_ALLOW,
+        ALLOW,
+        DISALLOW
+    }
+
     enum DelegateChange {
         REFUSED,
         UNCHANGED,
@@ -2285,17 +2291,19 @@ public class PreferencesHelper implements RankingConfig {
     }
 
     DelegateChange setNotificationDelegateIfUnclaimed(String sourcePkg, int sourceUid,
-            String delegatePkg, int delegateUid, boolean enabled) {
+            String delegatePkg, int delegateUid, DelegateMode mode) {
+        final boolean enabled = mode != DelegateMode.DISALLOW;
         synchronized (mLock) {
             final PackagePreferences prefs = getPackagePreferencesLocked(sourcePkg, sourceUid);
             final Delegate existing = prefs == null ? null : prefs.delegate;
             if (existing == null) {
-                if (!enabled) {
+                getOrCreatePackagePreferencesLocked(sourcePkg, sourceUid).delegate =
+                        new Delegate(delegatePkg, delegateUid, enabled);
+            } else {
+                // Automatic delegation never changes an existing choice, even if disabled.
+                if (mode == DelegateMode.AUTO_ALLOW) {
                     return DelegateChange.UNCHANGED;
                 }
-                getOrCreatePackagePreferencesLocked(sourcePkg, sourceUid).delegate =
-                        new Delegate(delegatePkg, delegateUid, true);
-            } else {
                 if (!delegatePkg.equals(existing.mPkg) || existing.mUid != delegateUid) {
                     return DelegateChange.REFUSED;
                 }

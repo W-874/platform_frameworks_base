@@ -157,6 +157,7 @@ import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.any;
@@ -231,6 +232,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.LauncherApps;
 import android.content.pm.ModuleInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManagerInternal;
 import android.content.pm.ParceledListSlice;
@@ -393,6 +395,11 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
     private static final String PKG_NO_CHANNELS = "com.example.no.channels";
     private static final String MIPUSH_FEATURE = "org.uwuaosp.feature.MIPUSH";
     private static final String XMSF_PACKAGE = "com.xiaomi.xmsf";
+    private static final String MIPUSH_REGISTRATION_CONFIRMED =
+            "org.uwuaosp.mipush.REGISTRATION_CONFIRMED";
+    private static final String MIPUSH_FIRST_INSTALL_TIME =
+            "org.uwuaosp.mipush.extra.FIRST_INSTALL_TIME";
+    private static final long MIPUSH_TARGET_INSTALL_TIME = 1234L;
     private static final String MIPUSH_TARGET_PACKAGE = "com.example.mipush.target";
     private static final String MIPUSH_CHANNEL_ID = "mipush_" + MIPUSH_TARGET_PACKAGE + "_default";
     private static final String MISSING_PACKAGE = "MISSING!";
@@ -5779,6 +5786,161 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
 
         latch.await();
         verify(mAmi).hasForegroundServiceNotification(anyString(), anyInt(), anyString());
+    }
+
+    private PackageInfo setUpMiPushRegistration(int userId, int xmsfUid, int targetUid)
+            throws RemoteException {
+        ApplicationInfo xmsf = new ApplicationInfo();
+        xmsf.packageName = XMSF_PACKAGE;
+        xmsf.uid = xmsfUid;
+        xmsf.flags = ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_INSTALLED;
+        when(mPackageManager.getApplicationInfo(eq(XMSF_PACKAGE), anyLong(), eq(userId)))
+                .thenReturn(xmsf);
+        when(mPackageManager.getPackagesForUid(xmsfUid)).thenReturn(new String[] {XMSF_PACKAGE});
+
+        PackageInfo target = new PackageInfo();
+        target.packageName = MIPUSH_TARGET_PACKAGE;
+        target.firstInstallTime = MIPUSH_TARGET_INSTALL_TIME;
+        target.applicationInfo = new ApplicationInfo();
+        target.applicationInfo.packageName = MIPUSH_TARGET_PACKAGE;
+        target.applicationInfo.uid = targetUid;
+        target.applicationInfo.flags = ApplicationInfo.FLAG_INSTALLED;
+        when(mPackageManager.getPackageInfo(eq(MIPUSH_TARGET_PACKAGE), anyLong(), eq(userId)))
+                .thenReturn(target);
+        when(mPackageManager.getServiceInfo(eq(new ComponentName(MIPUSH_TARGET_PACKAGE,
+                "com.xiaomi.mipush.sdk.PushMessageHandler")), anyLong(), eq(userId)))
+                .thenReturn(new ServiceInfo());
+        when(mPackageManager.getServiceInfo(eq(new ComponentName(MIPUSH_TARGET_PACKAGE,
+                "com.xiaomi.mipush.sdk.MessageHandleService")), anyLong(), eq(userId)))
+                .thenReturn(new ServiceInfo());
+        return target;
+    }
+
+    private void deliverMiPushRegistration(int fromUid, int deliveryUser, int claimedTargetUid,
+            long claimedInstallTime) {
+        BroadcastReceiver receiver = mService.new MiPushRegistrationReceiver();
+        receiver.setPendingResult(new BroadcastReceiver.PendingResult(0, null, null,
+                BroadcastReceiver.PendingResult.TYPE_REGISTERED, false, false, true, null,
+                deliveryUser, 0, fromUid, XMSF_PACKAGE));
+        receiver.onReceive(mContext, new Intent(MIPUSH_REGISTRATION_CONFIRMED)
+                .setPackage("android")
+                .putExtra(Intent.EXTRA_PACKAGE_NAME, MIPUSH_TARGET_PACKAGE)
+                .putExtra(Intent.EXTRA_UID, claimedTargetUid)
+                .putExtra(MIPUSH_FIRST_INSTALL_TIME, claimedInstallTime));
+    }
+
+    private void deliverMiPushRegistration() {
+        deliverMiPushRegistration(mUid, mUserId, mMiPushTargetUid, MIPUSH_TARGET_INSTALL_TIME);
+    }
+
+    private String getMiPushTargetDelegate() {
+        return mService.mPreferencesHelper.getNotificationDelegate(MIPUSH_TARGET_PACKAGE,
+                mMiPushTargetUid);
+    }
+
+    @Test
+    public void miPushRegistration_receiverNotRegisteredWithoutFeature() {
+        verify(mContext, never()).registerReceiverAsUser(any(), any(),
+                argThat(filter -> filter.hasAction(MIPUSH_REGISTRATION_CONFIRMED)),
+                any(), any(), anyInt());
+    }
+
+    @Test
+    public void miPushRegistration_grantsInBroadcastUserOnly() throws Exception {
+        final int otherUser = mUserId + 1;
+        final int xmsfUid = UserHandle.getUid(otherUser, UserHandle.getAppId(mUid));
+        final int targetUid = UserHandle.getUid(otherUser, UserHandle.getAppId(mMiPushTargetUid));
+        setUpMiPushRegistration(otherUser, xmsfUid, targetUid);
+        setUpMiPushRegistration(mUserId, mUid, mMiPushTargetUid);
+
+        deliverMiPushRegistration(xmsfUid, otherUser, targetUid, MIPUSH_TARGET_INSTALL_TIME);
+
+        assertThat(mService.mPreferencesHelper.isDelegateAllowed(MIPUSH_TARGET_PACKAGE, targetUid,
+                XMSF_PACKAGE, xmsfUid)).isTrue();
+        assertThat(getMiPushTargetDelegate()).isNull();
+    }
+
+    @Test
+    public void miPushRegistration_requiresAuthenticSingletonSender() throws Exception {
+        setUpMiPushRegistration(mUserId, mUid, mMiPushTargetUid);
+
+        deliverMiPushRegistration(Process.INVALID_UID, mUserId, mMiPushTargetUid,
+                MIPUSH_TARGET_INSTALL_TIME);
+        deliverMiPushRegistration(mMiPushTargetUid, mUserId, mMiPushTargetUid,
+                MIPUSH_TARGET_INSTALL_TIME);
+        when(mPackageManager.getPackagesForUid(mUid))
+                .thenReturn(new String[] {XMSF_PACKAGE, "com.example.shared"});
+        deliverMiPushRegistration();
+
+        assertThat(getMiPushTargetDelegate()).isNull();
+    }
+
+    @Test
+    public void miPushRegistration_rejectsWrongDeliveryUserOrInstallIdentity() throws Exception {
+        setUpMiPushRegistration(mUserId, mUid, mMiPushTargetUid);
+
+        deliverMiPushRegistration(mUid, mUserId + 1, mMiPushTargetUid, MIPUSH_TARGET_INSTALL_TIME);
+        deliverMiPushRegistration(mUid, mUserId, mUid, MIPUSH_TARGET_INSTALL_TIME);
+        deliverMiPushRegistration(mUid, mUserId, mMiPushTargetUid, MIPUSH_TARGET_INSTALL_TIME - 1);
+        deliverMiPushRegistration(mUid, mUserId, mMiPushTargetUid, 0);
+
+        assertThat(getMiPushTargetDelegate()).isNull();
+    }
+
+    @Test
+    public void miPushRegistration_requiresEligibleTarget() throws Exception {
+        final PackageInfo target = setUpMiPushRegistration(mUserId, mUid, mMiPushTargetUid);
+        target.applicationInfo.flags |= ApplicationInfo.FLAG_SYSTEM;
+        deliverMiPushRegistration();
+        assertThat(getMiPushTargetDelegate()).isNull();
+
+        target.applicationInfo.flags = ApplicationInfo.FLAG_INSTALLED;
+        when(mPackageManager.getServiceInfo(eq(new ComponentName(MIPUSH_TARGET_PACKAGE,
+                "com.xiaomi.mipush.sdk.MessageHandleService")), anyLong(), eq(mUserId)))
+                .thenReturn(null);
+        deliverMiPushRegistration();
+        assertThat(getMiPushTargetDelegate()).isNull();
+    }
+
+    @Test
+    public void miPushRegistration_preservesOtherDelegate() throws Exception {
+        setUpMiPushRegistration(mUserId, mUid, mMiPushTargetUid);
+        mService.mPreferencesHelper.setNotificationDelegate(MIPUSH_TARGET_PACKAGE,
+                mMiPushTargetUid, PKG_O, mUid);
+
+        deliverMiPushRegistration();
+
+        assertThat(getMiPushTargetDelegate()).isEqualTo(PKG_O);
+    }
+
+    @Test
+    public void miPushRegistration_doesNotRestoreRevokedDelegate() throws Exception {
+        setUpMiPushRegistration(mUserId, mUid, mMiPushTargetUid);
+        deliverMiPushRegistration();
+        assertThat(getMiPushTargetDelegate()).isEqualTo(XMSF_PACKAGE);
+        mService.mPreferencesHelper.revokeNotificationDelegate(MIPUSH_TARGET_PACKAGE,
+                mMiPushTargetUid);
+
+        deliverMiPushRegistration();
+
+        assertThat(getMiPushTargetDelegate()).isNull();
+    }
+
+    @Test
+    public void miPushRegistration_preservesDisallowBeforeGrant() throws Exception {
+        setUpMiPushRegistration(mUserId, mUid, mMiPushTargetUid);
+        assertThat(mService.mPreferencesHelper.setNotificationDelegateIfUnclaimed(
+                MIPUSH_TARGET_PACKAGE, mMiPushTargetUid, XMSF_PACKAGE, mUid,
+                PreferencesHelper.DelegateMode.DISALLOW))
+                .isEqualTo(PreferencesHelper.DelegateChange.CHANGED);
+        deliverMiPushRegistration();
+        assertThat(getMiPushTargetDelegate()).isNull();
+
+        assertThat(mService.mPreferencesHelper.setNotificationDelegateIfUnclaimed(
+                MIPUSH_TARGET_PACKAGE, mMiPushTargetUid, XMSF_PACKAGE, mUid,
+                PreferencesHelper.DelegateMode.ALLOW))
+                .isEqualTo(PreferencesHelper.DelegateChange.CHANGED);
+        assertThat(getMiPushTargetDelegate()).isEqualTo(XMSF_PACKAGE);
     }
 
     private ApplicationInfo setUpMiPushChannelCaller() throws RemoteException {

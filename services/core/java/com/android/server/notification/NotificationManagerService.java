@@ -283,6 +283,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.LauncherApps;
 import android.content.pm.ModuleInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageItemInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
@@ -486,6 +487,10 @@ public class NotificationManagerService extends SystemService {
 
     private static final String FEATURE_MIPUSH = "org.uwuaosp.feature.MIPUSH";
     private static final String MIPUSH_PACKAGE = "com.xiaomi.xmsf";
+    private static final String ACTION_MIPUSH_REGISTRATION_CONFIRMED =
+            "org.uwuaosp.mipush.REGISTRATION_CONFIRMED";
+    private static final String EXTRA_MIPUSH_FIRST_INSTALL_TIME =
+            "org.uwuaosp.mipush.extra.FIRST_INSTALL_TIME";
     private static final String MIPUSH_MESSAGE_HANDLER = "com.xiaomi.mipush.sdk.PushMessageHandler";
     private static final String MIPUSH_MESSAGE_SERVICE = "com.xiaomi.mipush.sdk.MessageHandleService";
     private static final long MATCH_MIPUSH_COMPONENTS =
@@ -899,6 +904,8 @@ public class NotificationManagerService extends SystemService {
 
     // Broadcast intent receiver for notification permissions review-related intents
     private ReviewNotificationPermissionsReceiver mReviewNotificationPermissionsReceiver;
+
+    private BroadcastReceiver mMiPushRegistrationReceiver;
 
     private AppOpsManager.OnOpChangedListener mAppOpsListener;
 
@@ -2487,6 +2494,20 @@ public class NotificationManagerService extends SystemService {
         }
     };
 
+    @VisibleForTesting
+    final class MiPushRegistrationReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (ACTION_MIPUSH_REGISTRATION_CONFIRMED.equals(intent.getAction())
+                    && PackageManagerService.PLATFORM_PACKAGE_NAME.equals(intent.getPackage())) {
+                final int senderUid = getSentFromUid();
+                if (UserHandle.isApp(senderUid)) {
+                    maybeSetAutomaticMiPushDelegate(intent, senderUid, getSendingUserId());
+                }
+            }
+        }
+    }
+
     private final BroadcastReceiver mRestoreReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -3280,6 +3301,13 @@ public class NotificationManagerService extends SystemService {
         IntentFilter localeChangedFilter = new IntentFilter(Intent.ACTION_LOCALE_CHANGED);
         getContext().registerReceiver(mLocaleChangeReceiver, localeChangedFilter);
 
+        if (mPackageManagerClient.hasSystemFeature(FEATURE_MIPUSH)) {
+            mMiPushRegistrationReceiver = new MiPushRegistrationReceiver();
+            getContext().registerReceiverAsUser(mMiPushRegistrationReceiver, UserHandle.ALL,
+                    new IntentFilter(ACTION_MIPUSH_REGISTRATION_CONFIRMED), null, null,
+                    Context.RECEIVER_EXPORTED);
+        }
+
         mReviewNotificationPermissionsReceiver = new ReviewNotificationPermissionsReceiver();
         getContext().registerReceiver(mReviewNotificationPermissionsReceiver,
                 ReviewNotificationPermissionsReceiver.getFilter(),
@@ -3323,6 +3351,9 @@ public class NotificationManagerService extends SystemService {
         }
         if (mLocaleChangeReceiver != null) {
             getContext().unregisterReceiver(mLocaleChangeReceiver);
+        }
+        if (mMiPushRegistrationReceiver != null) {
+            getContext().unregisterReceiver(mMiPushRegistrationReceiver);
         }
         if (mSettingsObserver != null) {
             mSettingsObserver.destroy();
@@ -13079,10 +13110,7 @@ public class NotificationManagerService extends SystemService {
         }
         final long token = Binder.clearCallingIdentity();
         try {
-            if (!isOnlyMiPushPackageForUid(callingUid)) {
-                return INVALID_UID;
-            }
-            final ApplicationInfo xmsf = getPreinstalledMiPushApp(userId);
+            final ApplicationInfo xmsf = getTrustedMiPushApp(userId);
             if (xmsf == null || xmsf.uid != callingUid) {
                 return INVALID_UID;
             }
@@ -13099,18 +13127,50 @@ public class NotificationManagerService extends SystemService {
         }
     }
 
+    private void maybeSetAutomaticMiPushDelegate(Intent intent, int senderUid, int deliveryUserId) {
+        final int userId = UserHandle.getUserId(senderUid);
+        if (deliveryUserId != userId) {
+            return;
+        }
+        try {
+            final ApplicationInfo xmsf = getTrustedMiPushApp(userId);
+            if (xmsf == null || xmsf.uid != senderUid) {
+                return;
+            }
+            final String pkg = intent.getStringExtra(Intent.EXTRA_PACKAGE_NAME);
+            final int claimedUid = intent.getIntExtra(Intent.EXTRA_UID, INVALID_UID);
+            final long firstInstallTime = intent.getLongExtra(EXTRA_MIPUSH_FIRST_INSTALL_TIME, 0);
+            if (TextUtils.isEmpty(pkg) || MIPUSH_PACKAGE.equals(pkg) || firstInstallTime <= 0) {
+                return;
+            }
+            final PackageInfo info = mPackageManager.getPackageInfo(pkg,
+                    MATCH_MIPUSH_COMPONENTS, userId);
+            if (info == null || info.applicationInfo == null
+                    || info.applicationInfo.uid != claimedUid
+                    || info.firstInstallTime != firstInstallTime
+                    || !isEligibleMiPushDelegateTarget(pkg, info.applicationInfo, userId, senderUid)) {
+                return;
+            }
+            updateMiPushDelegate(pkg, info.applicationInfo.uid, senderUid,
+                    PreferencesHelper.DelegateMode.AUTO_ALLOW);
+        } catch (RemoteException e) {
+            // Fail closed if the sender or target cannot be verified.
+        }
+    }
+
+    @Nullable
+    private ApplicationInfo getTrustedMiPushApp(int userId) throws RemoteException {
+        final ApplicationInfo app = mPackageManager.getApplicationInfo(MIPUSH_PACKAGE,
+                MATCH_MIPUSH_COMPONENTS, userId);
+        return app != null && app.isSystemApp() && (app.flags & ApplicationInfo.FLAG_INSTALLED) != 0
+                && UserHandle.isApp(app.uid) && UserHandle.getUserId(app.uid) == userId
+                && isOnlyMiPushPackageForUid(app.uid) ? app : null;
+    }
+
     private boolean isOnlyMiPushPackageForUid(int uid) throws RemoteException {
         final String[] packages = mPackageManager.getPackagesForUid(uid);
         // A shared UID cannot establish which package made a call.
         return packages != null && packages.length == 1 && MIPUSH_PACKAGE.equals(packages[0]);
-    }
-
-    @Nullable
-    private ApplicationInfo getPreinstalledMiPushApp(int userId) throws RemoteException {
-        final ApplicationInfo app = mPackageManager.getApplicationInfo(MIPUSH_PACKAGE,
-                MATCH_MIPUSH_COMPONENTS, userId);
-        return app != null && app.isSystemApp() && (app.flags & ApplicationInfo.FLAG_INSTALLED) != 0
-                && UserHandle.isApp(app.uid) && UserHandle.getUserId(app.uid) == userId ? app : null;
     }
 
     // Called by the user-authorized adb shell command with its original Binder identity.
@@ -13122,30 +13182,42 @@ public class NotificationManagerService extends SystemService {
         final long token = Binder.clearCallingIdentity();
         try {
             final int userId = ActivityManager.getCurrentUser();
-            final ApplicationInfo xmsf = getPreinstalledMiPushApp(userId);
-            if (xmsf == null || MIPUSH_PACKAGE.equals(pkg) || !isOnlyMiPushPackageForUid(xmsf.uid)) {
+            final ApplicationInfo xmsf = getTrustedMiPushApp(userId);
+            if (xmsf == null || MIPUSH_PACKAGE.equals(pkg)) {
                 return false;
             }
             final ApplicationInfo target = mPackageManager.getApplicationInfo(pkg,
                     MATCH_MIPUSH_COMPONENTS, userId);
-            if (target == null || target.isSystemApp() || target.isUpdatedSystemApp()
-                    || (target.flags & ApplicationInfo.FLAG_INSTALLED) == 0
-                    || !UserHandle.isApp(target.uid) || UserHandle.getUserId(target.uid) != userId
-                    || target.uid == xmsf.uid || !hasMiPushSdkServices(pkg, userId)) {
+            if (!isEligibleMiPushDelegateTarget(pkg, target, userId, xmsf.uid)) {
                 return false;
             }
-            final PreferencesHelper.DelegateChange change =
-                    mPreferencesHelper.setNotificationDelegateIfUnclaimed(pkg, target.uid,
-                            MIPUSH_PACKAGE, xmsf.uid, enabled);
-            if (change == PreferencesHelper.DelegateChange.CHANGED) {
-                handleSavePolicyFile();
-            }
-            return change != PreferencesHelper.DelegateChange.REFUSED;
+            return updateMiPushDelegate(pkg, target.uid, xmsf.uid,
+                    enabled ? PreferencesHelper.DelegateMode.ALLOW
+                            : PreferencesHelper.DelegateMode.DISALLOW);
         } catch (RemoteException e) {
             return false;
         } finally {
             Binder.restoreCallingIdentity(token);
         }
+    }
+
+    private boolean isEligibleMiPushDelegateTarget(String pkg, @Nullable ApplicationInfo target,
+            int userId, int xmsfUid) throws RemoteException {
+        return target != null && !target.isSystemApp() && !target.isUpdatedSystemApp()
+                && (target.flags & ApplicationInfo.FLAG_INSTALLED) != 0
+                && UserHandle.isApp(target.uid) && UserHandle.getUserId(target.uid) == userId
+                && target.uid != xmsfUid && hasMiPushSdkServices(pkg, userId);
+    }
+
+    private boolean updateMiPushDelegate(String pkg, int targetUid, int xmsfUid,
+            PreferencesHelper.DelegateMode mode) {
+        final PreferencesHelper.DelegateChange change =
+                mPreferencesHelper.setNotificationDelegateIfUnclaimed(pkg, targetUid,
+                        MIPUSH_PACKAGE, xmsfUid, mode);
+        if (change == PreferencesHelper.DelegateChange.CHANGED) {
+            handleSavePolicyFile();
+        }
+        return change != PreferencesHelper.DelegateChange.REFUSED;
     }
 
     private boolean hasMiPushSdkServices(String pkg, int userId) throws RemoteException {

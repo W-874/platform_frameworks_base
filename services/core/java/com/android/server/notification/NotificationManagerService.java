@@ -9978,9 +9978,16 @@ public class NotificationManagerService extends SystemService {
             final AttributionSource attributionSource =
                     new AttributionSource.Builder(notificationUid)
                             .setPackageName(pkg).build();
-            final boolean canPostPromoted = mPermissionManager.checkPermissionForDataDelivery(
-                    permission.POST_PROMOTED_NOTIFICATIONS, attributionSource,
-                    /* message= */ null) == PermissionManager.PERMISSION_GRANTED;
+            // Note the authorized target's AppOp as the service, not as the delegate.
+            final long token = Binder.clearCallingIdentity();
+            final boolean canPostPromoted;
+            try {
+                canPostPromoted = mPermissionManager.checkPermissionForDataDelivery(
+                        permission.POST_PROMOTED_NOTIFICATIONS, attributionSource,
+                        /* message= */ null) == PermissionManager.PERMISSION_GRANTED;
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
             if (canPostPromoted) {
                 notification.flags |= FLAG_PROMOTED_ONGOING;
             }

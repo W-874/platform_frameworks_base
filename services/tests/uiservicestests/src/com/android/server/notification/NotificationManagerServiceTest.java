@@ -218,6 +218,7 @@ import android.app.usage.UsageStatsManagerInternal;
 import android.companion.AssociationInfo;
 import android.companion.ICompanionDeviceManager;
 import android.compat.testing.PlatformCompatChangeRule;
+import android.content.AttributionSource;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.ContentProvider;
@@ -19065,6 +19066,54 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
 
         assertThat(mService.hasFlag(captor.getValue().getNotification().flags,
                 FLAG_PROMOTED_ONGOING)).isTrue();
+    }
+
+    @Test
+    public void testPostPromotableNotification_delegatePostsPromoted() throws Exception {
+        postAndVerifyDelegatedPromotableNotification(PermissionManager.PERMISSION_GRANTED);
+    }
+
+    @Test
+    public void testPostPromotableNotification_delegatePostsWithoutPromotionWhenDenied()
+            throws Exception {
+        postAndVerifyDelegatedPromotableNotification(PermissionManager.PERMISSION_SOFT_DENIED);
+    }
+
+    private void postAndVerifyDelegatedPromotableNotification(int permissionResult)
+            throws Exception {
+        when(mPackageManagerClient.getPackageUidAsUser(PKG_O, mUserId)).thenReturn(UID_O);
+        when(mPmi.isSameApp(PKG_O, 0L, mUid, mUserId)).thenReturn(false);
+        mService.mPreferencesHelper.createNotificationChannel(PKG_O, UID_O,
+                mTestNotificationChannel, true /* fromTargetApp */, false, UID_O, false);
+        mService.mPreferencesHelper.setNotificationDelegate(PKG_O, UID_O, mPkg, mUid);
+        when(mPermissionManager.checkPermissionForDataDelivery(
+                eq(Manifest.permission.POST_PROMOTED_NOTIFICATIONS), any(), any()))
+                .thenAnswer(invocation -> {
+                    // A local Binder call has no incoming transaction. This only succeeds
+                    // once the service establishes its own identity with clearCallingIdentity().
+                    assertThat(Binder.getCallingUidOrThrow()).isEqualTo(Process.myUid());
+                    AttributionSource source = invocation.getArgument(1);
+                    assertThat(source.getUid()).isEqualTo(UID_O);
+                    assertThat(source.getPackageName()).isEqualTo(PKG_O);
+                    return permissionResult;
+                });
+
+        mBinderService.enqueueNotificationWithTag(PKG_O, mPkg, null, 9,
+                createPromotableNotification(), mUserId);
+        assertThrows(IllegalStateException.class, Binder::getCallingUidOrThrow);
+        waitForPost();
+        verify(mPermissionManager).checkPermissionForDataDelivery(
+                eq(Manifest.permission.POST_PROMOTED_NOTIFICATIONS), any(), isNull());
+
+        ArgumentCaptor<NotificationRecord> captor =
+                ArgumentCaptor.forClass(NotificationRecord.class);
+        verify(mListeners).prepareNotifyPostedLocked(captor.capture(), any(), anyBoolean());
+        StatusBarNotification posted = captor.getValue().getSbn();
+        assertThat(posted.getUid()).isEqualTo(UID_O);
+        assertThat(posted.getPackageName()).isEqualTo(PKG_O);
+        assertThat(posted.getOpPkg()).isEqualTo(mPkg);
+        assertThat((posted.getNotification().flags & FLAG_PROMOTED_ONGOING) != 0)
+                .isEqualTo(permissionResult == PermissionManager.PERMISSION_GRANTED);
     }
 
     @Test

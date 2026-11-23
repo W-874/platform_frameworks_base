@@ -54,6 +54,24 @@ public class CaptureResultExtras implements Parcelable {
         readFromParcel(in);
     }
 
+    /**
+     * Compat constructor matching the pre-Android 16 signature used by MiuiCamera's
+     * VirtualCameraReprocessor via reflection.
+     * @hide
+     */
+    public CaptureResultExtras(int requestId, int subsequenceId, int afTriggerId,
+                               int precaptureTriggerId, long frameNumber,
+                               int partialResultCount, int errorStreamId,
+                               String errorPhysicalCameraId) {
+        this(requestId, subsequenceId, afTriggerId, precaptureTriggerId, frameNumber,
+                partialResultCount, errorStreamId, errorPhysicalCameraId,
+                /* lastCompletedRegularFrameNumber */ 0L,
+                /* lastCompletedReprocessFrameNumber */ 0L,
+                /* lastCompletedZslFrameNumber */ 0L,
+                /* hasReadoutTimestamp */ false,
+                /* readoutTimestamp */ 0L);
+    }
+
     public CaptureResultExtras(int requestId, int subsequenceId, int afTriggerId,
                                int precaptureTriggerId, long frameNumber,
                                int partialResultCount, int errorStreamId,

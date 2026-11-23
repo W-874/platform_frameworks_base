@@ -43,17 +43,20 @@ import com.android.internal.logging.UiEvent;
 import com.android.internal.logging.UiEventLogger;
 import com.android.systemui.biometrics.AuthController;
 import com.android.systemui.broadcast.BroadcastDispatcher;
+import com.android.systemui.dagger.qualifiers.Main;
 import com.android.systemui.dock.DockManager;
 import com.android.systemui.doze.DozeMachine.State;
 import com.android.systemui.doze.dagger.DozeScope;
 import com.android.systemui.keyguard.shared.model.FingerprintAuthenticationStatus;
 import com.android.systemui.log.SessionTracker;
+import com.android.systemui.res.R;
 import com.android.systemui.settings.UserTracker;
 import com.android.systemui.statusbar.phone.DozeParameters;
 import com.android.systemui.statusbar.policy.DevicePostureController;
 import com.android.systemui.statusbar.policy.KeyguardStateController;
 import com.android.systemui.user.domain.interactor.SelectedUserInteractor;
 import com.android.systemui.util.Assert;
+import com.android.systemui.util.concurrency.DelayableExecutor;
 import com.android.systemui.util.sensors.ActivityDetectionProximitySensor;
 import com.android.systemui.util.sensors.AsyncSensorManager;
 import com.android.systemui.util.sensors.ProximityCheck;
@@ -97,6 +100,7 @@ public class DozeTriggers implements DozeMachine.Part {
     private final DozeParameters mDozeParameters;
     private final AsyncSensorManager mSensorManager;
     private final WakeLock mWakeLock;
+    @Nullable private final DozePickupTiltCheck mPickupTiltCheck;
     private final boolean mAllowPulseTriggers;
     private final TriggerReceiver mBroadcastReceiver = new TriggerReceiver();
     private final DockEventListener mDockEventListener = new DockEventListener();
@@ -122,6 +126,7 @@ public class DozeTriggers implements DozeMachine.Part {
             new UserTracker.Callback() {
                 @Override
                 public void onUserChanged(int newUser, @NonNull Context userContext) {
+                    cancelPickupTiltCheck();
                     mDozeSensors.onUserSwitched();
                 }
             };
@@ -211,13 +216,16 @@ public class DozeTriggers implements DozeMachine.Part {
             KeyguardStateController keyguardStateController,
             DevicePostureController devicePostureController,
             UserTracker userTracker,
-            SelectedUserInteractor selectedUserInteractor) {
+            SelectedUserInteractor selectedUserInteractor,
+            @Main DelayableExecutor mainExecutor) {
         mContext = context;
         mDozeHost = dozeHost;
         mConfig = config;
         mDozeParameters = dozeParameters;
         mSensorManager = sensorManager;
         mWakeLock = wakeLock;
+        mPickupTiltCheck = context.getResources().getBoolean(R.bool.doze_pickup_require_tilt)
+                ? new DozePickupTiltCheck(sensorManager, mainExecutor, wakeLock) : null;
         mAllowPulseTriggers = true;
         mSessionTracker = sessionTracker;
 
@@ -242,6 +250,7 @@ public class DozeTriggers implements DozeMachine.Part {
 
     @Override
     public void destroy() {
+        cancelPickupTiltCheck();
         mDozeSensors.destroy();
         mProxCheck.destroy();
     }
@@ -342,11 +351,7 @@ public class DozeTriggers implements DozeMachine.Part {
                     mDozeHost.onSlpiTap(screenX, screenY);
                     gentleWakeUp(pulseReason);
                 } else if (isPickup) {
-                    if (shouldDropPickupEvent())  {
-                        mDozeLog.traceSensorEventDropped(pulseReason, "keyguard occluded");
-                        return;
-                    }
-                    gentleWakeUp(pulseReason);
+                    handlePickup(pulseReason);
                 } else if (isUdfpsLongPress) {
                     if (canPulse(mMachine.getState(), true)) {
                         mDozeLog.d("updfsLongPress - setting aodInterruptRunnable to run when "
@@ -373,6 +378,38 @@ public class DozeTriggers implements DozeMachine.Part {
             final boolean withinVibrationThreshold =
                     timeSinceNotification < mDozeParameters.getPickupVibrationThreshold();
             mDozeLog.tracePickupWakeUp(withinVibrationThreshold);
+        }
+    }
+
+    private void handlePickup(int reason) {
+        if (shouldDropPickupEvent()) {
+            mDozeLog.traceSensorEventDropped(reason, "keyguard occluded");
+            return;
+        }
+        if (mPickupTiltCheck == null) {
+            gentleWakeUp(reason);
+            return;
+        }
+        if (!canPulse(mMachine.getState(), true)) {
+            return;
+        }
+        mPickupTiltCheck.check(tilted -> {
+            if (!tilted) {
+                mDozeLog.traceSensorEventDropped(reason, "pickup tilt not confirmed");
+                return;
+            }
+            int userId = mSelectedUserInteractor.getSelectedUserId();
+            if (canPulse(mMachine.getState(), true) && !shouldDropPickupEvent()
+                    && mConfig.enabled(userId) && mConfig.pickupGestureEnabled(userId)
+                    && !Boolean.TRUE.equals(mDozeSensors.isProximityCurrentlyNear())) {
+                gentleWakeUp(reason);
+            }
+        });
+    }
+
+    private void cancelPickupTiltCheck() {
+        if (mPickupTiltCheck != null) {
+            mPickupTiltCheck.cancel();
         }
     }
 
@@ -477,6 +514,9 @@ public class DozeTriggers implements DozeMachine.Part {
 
     @Override
     public void transitionTo(DozeMachine.State oldState, DozeMachine.State newState) {
+        if (!canPulse(newState, true)) {
+            cancelPickupTiltCheck();
+        }
         if (oldState == DOZE_SUSPEND_TRIGGERS && (newState != FINISH
                 && newState != UNINITIALIZED)) {
             // Register callbacks that were unregistered when we switched to

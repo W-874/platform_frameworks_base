@@ -52,6 +52,7 @@ import com.android.systemui.broadcast.BroadcastDispatcher;
 import com.android.systemui.dock.DockManager;
 import com.android.systemui.doze.DozeTriggers.DozingUpdateUiEvent;
 import com.android.systemui.log.SessionTracker;
+import com.android.systemui.res.R;
 import com.android.systemui.settings.UserTracker;
 import com.android.systemui.statusbar.phone.DozeParameters;
 import com.android.systemui.statusbar.policy.DevicePostureController;
@@ -153,7 +154,7 @@ public class DozeTriggersTest extends SysuiTestCase {
                 asyncSensorManager, wakeLock, mDockManager, mProximitySensor,
                 mProximityCheck, mDozeLog, mBroadcastDispatcher, new FakeSettings(),
                 mAuthController, mUiEventLogger, mSessionTracker, mKeyguardStateController,
-                mDevicePostureController, mUserTracker, mSelectedUserInteractor);
+                mDevicePostureController, mUserTracker, mSelectedUserInteractor, mExecutor);
         mTriggers.setDozeMachine(mMachine);
         waitForSensorManager();
     }
@@ -555,6 +556,56 @@ public class DozeTriggersTest extends SysuiTestCase {
 
         // THEN wakeup
         verify(mMachine).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
+    }
+
+    @Test
+    public void pickupTilt_flatSamplesDoNotWakeAndNextTiltCanWake() throws Exception {
+        enablePickupTiltCheck();
+        triggerPickupForTiltCheck();
+        sendAcceleration(0.03f, -0.11f, 9.56f);
+        sendAcceleration(0.02f, -0.12f, 9.55f);
+        mExecutor.advanceClockToNext();
+        verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
+        verify(mDozeLog).traceSensorEventDropped(
+                DozeLog.REASON_SENSOR_PICKUP, "pickup tilt not confirmed");
+
+        triggerPickupForTiltCheck();
+        sendAcceleration(0f, 6f, 8f);
+        verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
+        sendAcceleration(0f, 6f, 8f);
+        verify(mMachine).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
+    }
+
+    @Test
+    public void pickupTilt_ignoresLateSamplesAfterDozeFinishes() throws Exception {
+        enablePickupTiltCheck();
+        triggerPickupForTiltCheck();
+        sendAcceleration(0f, 6f, 8f);
+        mTriggers.transitionTo(DozeMachine.State.DOZE, DozeMachine.State.FINISH);
+        waitForSensorManager();
+
+        sendAcceleration(0f, 6f, 8f);
+        mExecutor.advanceClockToNext();
+        verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
+        verify(mDozeLog, never()).traceSensorEventDropped(
+                DozeLog.REASON_SENSOR_PICKUP, "pickup tilt not confirmed");
+    }
+
+    private void enablePickupTiltCheck() throws Exception {
+        mContext.getOrCreateTestableResources().addOverride(R.bool.doze_pickup_require_tilt, true);
+        when(mConfig.enabled(anyInt())).thenReturn(true);
+        when(mConfig.pickupGestureEnabled(anyInt())).thenReturn(true);
+        setupDozeTriggers(mConfig, DozeConfigurationUtil.createMockParameters());
+        when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE);
+    }
+
+    private void triggerPickupForTiltCheck() {
+        mTriggers.onSensor(DozeLog.REASON_SENSOR_PICKUP, true, -1, -1, null);
+        waitForSensorManager();
+    }
+
+    private void sendAcceleration(float x, float y, float z) {
+        mSensors.getFakeAccelerometer().sendSensorEvent(x, y, z);
     }
 
     @Test

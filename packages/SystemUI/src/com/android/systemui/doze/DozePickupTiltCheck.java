@@ -22,31 +22,32 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 
 import com.android.systemui.util.concurrency.DelayableExecutor;
+import com.android.systemui.util.time.SystemClock;
 import com.android.systemui.util.wakelock.WakeLock;
 
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-/** Confirms a pickup with a short, unbatched accelerometer sample on the main thread. */
+/** Confirms a pickup with a short, unbatched accelerometer window on the main thread. */
 final class DozePickupTiltCheck {
     private static final String WAKE_LOCK_TAG = "DozePickupTiltCheck";
-    private static final long TIMEOUT_MS = 250;
     private static final int SAMPLE_PERIOD_US = 20_000;
-    private static final float MIN_MAGNITUDE_SQUARED = 7 * 7;
-    private static final float MAX_MAGNITUDE_SQUARED = 13 * 13;
-    // sin²(20°): X/Y are in the display plane, Z is normal to it.
-    private static final float MIN_IN_PLANE_FRACTION_SQUARED = 0.117f;
+    private static final long COOLDOWN_NS = TimeUnit.MILLISECONDS.toNanos(1_200);
 
     private final SensorManager mSensorManager;
     private final Sensor mAccelerometer;
     private final DelayableExecutor mMainExecutor;
+    private final SystemClock mClock;
     private final WakeLock mWakeLock;
     private SampleWindow mWindow;
+    private long mCooldownUntilNs;
 
     DozePickupTiltCheck(SensorManager sensorManager, DelayableExecutor mainExecutor,
-            WakeLock wakeLock) {
+            WakeLock wakeLock, SystemClock clock) {
         mSensorManager = sensorManager;
         mAccelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         mMainExecutor = mainExecutor;
+        mClock = clock;
         mWakeLock = wakeLock;
     }
 
@@ -54,15 +55,20 @@ final class DozePickupTiltCheck {
         if (mWindow != null) {
             return;
         }
+        long now = mClock.elapsedRealtimeNanos();
+        if (now < mCooldownUntilNs) {
+            callback.accept(false);
+            return;
+        }
         if (mAccelerometer == null) {
             callback.accept(false);
             return;
         }
-        SampleWindow window = new SampleWindow(callback);
+        SampleWindow window = new SampleWindow(callback, now);
         mWindow = window;
         mWakeLock.acquire(WAKE_LOCK_TAG);
-        window.mCancelTimeout = mMainExecutor.executeDelayed(() -> window.complete(false),
-                TIMEOUT_MS);
+        window.mCancelTimeout = mMainExecutor.executeDelayed(
+                () -> window.complete(window.mMotion.isConfirmed()), DozePickupMotion.WINDOW_MS);
         if (!mSensorManager.registerListener(window, mAccelerometer, SAMPLE_PERIOD_US)) {
             window.complete(false);
         }
@@ -80,11 +86,12 @@ final class DozePickupTiltCheck {
 
     private final class SampleWindow implements SensorEventListener {
         private final Consumer<Boolean> mCallback;
+        private final DozePickupMotion mMotion;
         private Runnable mCancelTimeout;
-        private boolean mPreviousSampleTilted;
 
-        SampleWindow(Consumer<Boolean> callback) {
+        SampleWindow(Consumer<Boolean> callback, long startNs) {
             mCallback = callback;
+            mMotion = new DozePickupMotion(startNs);
         }
 
         @Override
@@ -92,27 +99,23 @@ final class DozePickupTiltCheck {
             if (mWindow != this) {
                 return;
             }
-            float x = event.values[0];
-            float y = event.values[1];
-            float z = event.values[2];
-            float inPlane = x * x + y * y;
-            float magnitude = inPlane + z * z;
-            boolean tilted = magnitude >= MIN_MAGNITUDE_SQUARED
-                    && magnitude <= MAX_MAGNITUDE_SQUARED
-                    && inPlane >= magnitude * MIN_IN_PLANE_FRACTION_SQUARED;
-            if (tilted && mPreviousSampleTilted) {
-                complete(true);
+            mMotion.addSample(event.timestamp, event.values[0], event.values[1], event.values[2]);
+            if (mMotion.isRecurrent()) {
+                complete(false);
             }
-            mPreviousSampleTilted = tilted;
         }
 
         @Override
         public void onAccuracyChanged(Sensor sensor, int accuracy) {}
 
-        void complete(boolean tilted) {
+        void complete(boolean confirmed) {
             if (mWindow == this) {
+                // Do not restart sampling on each step of a recurring motion trigger.
+                if (confirmed || mMotion.isRecurrent()) {
+                    mCooldownUntilNs = mClock.elapsedRealtimeNanos() + COOLDOWN_NS;
+                }
                 cancel();
-                mCallback.accept(tilted);
+                mCallback.accept(confirmed);
             }
         }
     }

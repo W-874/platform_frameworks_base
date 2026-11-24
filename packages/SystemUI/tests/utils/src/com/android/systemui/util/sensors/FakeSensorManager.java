@@ -274,7 +274,12 @@ public class FakeSensorManager extends SensorManager {
         }
 
         public void sendSensorEvent(float... values) {
+            sendSensorEventAt(SystemClock.elapsedRealtimeNanos(), values);
+        }
+
+        public void sendSensorEventAt(long timestampNs, float... values) {
             SensorEvent event = createSensorEvent(values.length);
+            event.timestamp = timestampNs;
             System.arraycopy(values, 0, event.values, 0, values.length);
             for (SensorEventListener listener : mListeners) {
                 listener.onSensorChanged(event);
@@ -292,7 +297,6 @@ public class FakeSensorManager extends SensorManager {
                 throw new RuntimeException(e);
             }
             event.sensor = mSensor;
-            event.timestamp = SystemClock.elapsedRealtimeNanos();
 
             return event;
         }

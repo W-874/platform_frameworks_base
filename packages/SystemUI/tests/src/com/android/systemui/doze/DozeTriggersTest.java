@@ -119,7 +119,8 @@ public class DozeTriggersTest extends SysuiTestCase {
     private FakeSensorManager mSensors;
     private Sensor mTapSensor;
     private FakeProximitySensor mProximitySensor;
-    private final FakeExecutor mExecutor = new FakeExecutor(new FakeSystemClock());
+    private final FakeSystemClock mClock = new FakeSystemClock();
+    private final FakeExecutor mExecutor = new FakeExecutor(mClock);
 
     @Before
     public void setUp() throws Exception {
@@ -154,7 +155,7 @@ public class DozeTriggersTest extends SysuiTestCase {
                 asyncSensorManager, wakeLock, mDockManager, mProximitySensor,
                 mProximityCheck, mDozeLog, mBroadcastDispatcher, new FakeSettings(),
                 mAuthController, mUiEventLogger, mSessionTracker, mKeyguardStateController,
-                mDevicePostureController, mUserTracker, mSelectedUserInteractor, mExecutor);
+                mDevicePostureController, mUserTracker, mSelectedUserInteractor, mExecutor, mClock);
         mTriggers.setDozeMachine(mMachine);
         waitForSensorManager();
     }
@@ -559,20 +560,42 @@ public class DozeTriggersTest extends SysuiTestCase {
     }
 
     @Test
-    public void pickupTilt_flatSamplesDoNotWakeAndNextTiltCanWake() throws Exception {
+    public void pickupTilt_stationarySamplesDoNotWakeAndNextLiftCanWake() throws Exception {
         enablePickupTiltCheck();
         triggerPickupForTiltCheck();
-        sendAcceleration(0.03f, -0.11f, 9.56f);
-        sendAcceleration(0.02f, -0.12f, 9.55f);
+        sendAccelerationFor(460, 0.03f, -0.11f, 9.56f);
         mExecutor.advanceClockToNext();
         verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
         verify(mDozeLog).traceSensorEventDropped(
-                DozeLog.REASON_SENSOR_PICKUP, "pickup tilt not confirmed");
+                DozeLog.REASON_SENSOR_PICKUP, "pickup motion not confirmed");
 
         triggerPickupForTiltCheck();
-        sendAcceleration(0f, 6f, 8f);
+        sendLevelLift();
         verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
-        sendAcceleration(0f, 6f, 8f);
+        mExecutor.advanceClockToNext();
+        verify(mMachine).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
+    }
+
+    @Test
+    public void pickupTilt_recurringMotionBacksOffWithoutSamplingAgain() throws Exception {
+        enablePickupTiltCheck();
+        triggerPickupForTiltCheck();
+        sendAccelerationFor(60, 0f, 0f, 11.0f);
+        sendAccelerationFor(60, 0f, 0f, 8.5f);
+        sendAccelerationFor(60, 0f, 0f, 11.0f);
+        waitForSensorManager();
+        verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
+
+        clearInvocations(mSensors);
+        mClock.advanceTime(600);
+        triggerPickupForTiltCheck();
+        verify(mSensors, never()).registerListener(any(), eq(mSensors.getFakeAccelerometer()
+                .getSensor()), anyInt(), anyInt(), any());
+
+        mClock.advanceTime(600);
+        triggerPickupForTiltCheck();
+        sendLevelLift();
+        mExecutor.advanceClockToNext();
         verify(mMachine).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
     }
 
@@ -580,15 +603,15 @@ public class DozeTriggersTest extends SysuiTestCase {
     public void pickupTilt_ignoresLateSamplesAfterDozeFinishes() throws Exception {
         enablePickupTiltCheck();
         triggerPickupForTiltCheck();
-        sendAcceleration(0f, 6f, 8f);
+        sendAccelerationFor(60, 0f, 0f, 11.0f);
         mTriggers.transitionTo(DozeMachine.State.DOZE, DozeMachine.State.FINISH);
         waitForSensorManager();
 
-        sendAcceleration(0f, 6f, 8f);
+        sendLevelLift();
         mExecutor.advanceClockToNext();
         verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
         verify(mDozeLog, never()).traceSensorEventDropped(
-                DozeLog.REASON_SENSOR_PICKUP, "pickup tilt not confirmed");
+                DozeLog.REASON_SENSOR_PICKUP, "pickup motion not confirmed");
     }
 
     private void enablePickupTiltCheck() throws Exception {
@@ -604,8 +627,18 @@ public class DozeTriggersTest extends SysuiTestCase {
         waitForSensorManager();
     }
 
-    private void sendAcceleration(float x, float y, float z) {
-        mSensors.getFakeAccelerometer().sendSensorEvent(x, y, z);
+    private void sendLevelLift() {
+        sendAccelerationFor(60, 0f, 0f, 11.0f);
+        sendAccelerationFor(60, 0f, 0f, 8.5f);
+        sendAccelerationFor(340, 0f, 0.5f, 9.8f);
+    }
+
+    private void sendAccelerationFor(int durationMs, float x, float y, float z) {
+        for (int elapsedMs = 0; elapsedMs < durationMs; elapsedMs += 20) {
+            mSensors.getFakeAccelerometer().sendSensorEventAt(mClock.elapsedRealtimeNanos(),
+                    x, y, z);
+            mClock.advanceTime(20);
+        }
     }
 
     @Test

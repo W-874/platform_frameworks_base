@@ -217,7 +217,8 @@ public class DozeTriggers implements DozeMachine.Part {
             DevicePostureController devicePostureController,
             UserTracker userTracker,
             SelectedUserInteractor selectedUserInteractor,
-            @Main DelayableExecutor mainExecutor) {
+            @Main DelayableExecutor mainExecutor,
+            com.android.systemui.util.time.SystemClock clock) {
         mContext = context;
         mDozeHost = dozeHost;
         mConfig = config;
@@ -225,7 +226,7 @@ public class DozeTriggers implements DozeMachine.Part {
         mSensorManager = sensorManager;
         mWakeLock = wakeLock;
         mPickupTiltCheck = context.getResources().getBoolean(R.bool.doze_pickup_require_tilt)
-                ? new DozePickupTiltCheck(sensorManager, mainExecutor, wakeLock) : null;
+                ? new DozePickupTiltCheck(sensorManager, mainExecutor, wakeLock, clock) : null;
         mAllowPulseTriggers = true;
         mSessionTracker = sessionTracker;
 
@@ -393,9 +394,9 @@ public class DozeTriggers implements DozeMachine.Part {
         if (!canPulse(mMachine.getState(), true)) {
             return;
         }
-        mPickupTiltCheck.check(tilted -> {
-            if (!tilted) {
-                mDozeLog.traceSensorEventDropped(reason, "pickup tilt not confirmed");
+        mPickupTiltCheck.check(confirmed -> {
+            if (!confirmed) {
+                mDozeLog.traceSensorEventDropped(reason, "pickup motion not confirmed");
                 return;
             }
             int userId = mSelectedUserInteractor.getSelectedUserId();

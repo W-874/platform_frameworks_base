@@ -22,7 +22,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.dimensionResource
@@ -51,11 +50,10 @@ fun ContentScope.QuickQuickSettings(
     val columns = if (circular) QSTileStyle.CIRCULAR_QQS_COLUMNS else viewModel.columns
     val sizedTiles = viewModel.tileViewModels.let { if (circular) it.take(columns) else it }
     val tiles = sizedTiles.fastMap { it.tile }
-    val squishiness by viewModel.squishinessViewModel.squishiness.collectAsStateWithLifecycle()
+    val squishinessState = viewModel.squishinessViewModel.squishiness.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    // Stable lambda so the tiles can be skipped during recomposition.
-    val squishinessState = rememberUpdatedState(squishiness)
-    val squishinessProvider = remember { { squishinessState.value } }
+    // Read animated squishiness in the tile, without invalidating the whole grid.
+    val squishinessProvider = remember(squishinessState) { { squishinessState.value } }
 
     Box(modifier = modifier) {
         GridAnchor()

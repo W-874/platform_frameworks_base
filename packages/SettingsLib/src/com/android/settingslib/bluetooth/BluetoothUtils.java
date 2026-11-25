@@ -310,7 +310,10 @@ public class BluetoothUtils {
                     if (bitmap != null) {
                         final Bitmap resizedBitmap =
                                 Bitmap.createScaledBitmap(bitmap, iconSize, iconSize, false);
-                        bitmap.recycle();
+                        // Scaling to the same size may return the decoded bitmap itself.
+                        if (resizedBitmap != bitmap) {
+                            bitmap.recycle();
+                        }
                         return new Pair<>(
                                 new BitmapDrawable(resources, resizedBitmap), pair.second);
                     }
@@ -461,7 +464,10 @@ public class BluetoothUtils {
         if (bitmap != null) {
             final Bitmap resizedBitmap =
                     Bitmap.createScaledBitmap(bitmap, iconSize, iconSize, false);
-            bitmap.recycle();
+            // A BitmapDrawable owns its bitmap; other drawables were rasterized here.
+            if (!(drawable instanceof BitmapDrawable) && resizedBitmap != bitmap) {
+                bitmap.recycle();
+            }
             return new AdaptiveOutlineDrawable(resources, resizedBitmap, ICON_TYPE_ADVANCED);
         }
 

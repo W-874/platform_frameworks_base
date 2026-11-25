@@ -61,6 +61,8 @@ import android.bluetooth.BluetoothStatusCodes;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.hardware.input.InputManager;
 import android.media.AudioDeviceAttributes;
@@ -93,6 +95,8 @@ import org.mockito.MockitoAnnotations;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.GraphicsMode;
+import org.robolectric.shadows.ShadowBitmapFactory;
 import org.robolectric.shadow.api.Shadow;
 
 import java.util.ArrayList;
@@ -255,6 +259,38 @@ public class BluetoothUtilsTest {
                         mContext, mCachedBluetoothDevice)
                         .first)
                 .isSameInstanceAs(icon);
+    }
+
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    public void getBtDrawableWithDescription_iconAlreadyTargetSize_keepsBitmapUsable() {
+        Uri iconUri = Uri.parse("content://test.bluetooth/icon");
+        int size = mContext.getResources().getDimensionPixelSize(
+                com.android.settingslib.R.dimen.bt_nearby_icon_size);
+        ShadowBitmapFactory.provideWidthAndHeightHints(iconUri, size, size);
+        when(mBluetoothDevice.getMetadata(BluetoothDevice.METADATA_IS_UNTETHERED_HEADSET))
+                .thenReturn(BOOL_METADATA.getBytes());
+        when(mBluetoothDevice.getMetadata(BluetoothDevice.METADATA_MAIN_ICON))
+                .thenReturn(iconUri.toString().getBytes());
+        when(mCachedBluetoothDevice.getDevice()).thenReturn(mBluetoothDevice);
+
+        Drawable drawable = BluetoothUtils.getBtDrawableWithDescription(
+                mContext, mCachedBluetoothDevice).first;
+
+        Bitmap bitmap = ((BitmapDrawable) drawable).getBitmap();
+        assertThat(bitmap.isRecycled()).isFalse();
+        assertThat(bitmap.getWidth()).isEqualTo(size);
+        assertThat(bitmap.getHeight()).isEqualTo(size);
+    }
+
+    @Test
+    public void buildAdvancedDrawable_sharedBitmap_neverRecyclesSource() {
+        Bitmap bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+        BitmapDrawable source = new BitmapDrawable(mContext.getResources(), bitmap);
+
+        BluetoothUtils.buildAdvancedDrawable(mContext, source);
+
+        assertThat(bitmap.isRecycled()).isFalse();
     }
 
     @Test

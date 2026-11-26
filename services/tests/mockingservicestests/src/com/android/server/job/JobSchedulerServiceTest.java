@@ -147,6 +147,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
@@ -166,6 +167,11 @@ public class JobSchedulerServiceTest {
     private static final int TEST_UID = 10123;
     private static final String TEST_NAMESPACE = "JobSchedulerServiceTest";
     private static final int TEST_MAX_JOBS_PER_APP = 5;
+    private static final String LEGACY_DOLBY_PACKAGE = "com.motorola.dolby.dolbyui";
+    private static final ComponentName LEGACY_DOLBY_CHECKIN = new ComponentName(
+            LEGACY_DOLBY_PACKAGE, LEGACY_DOLBY_PACKAGE + ".checkin.CheckinSchedulerService");
+    private static final int LEGACY_DOLBY_JOB_ID = 555805291;
+    private static final int LEGACY_DOLBY_UID = 10249;
     private static final String TEST_PCC_PACKAGE = "com.example.pcc";
     private static final ComponentName TEST_PCC_COMPONENT =
             new ComponentName(TEST_PCC_PACKAGE, "PccJobService");
@@ -191,6 +197,9 @@ public class JobSchedulerServiceTest {
 
     @Rule
     public final CheckFlagsRule mCheckFlagsRule = DeviceFlagsValueProvider.createCheckFlagsRule();
+
+    @Rule
+    public final TemporaryFolder mJobStoreFolder = new TemporaryFolder();
 
     private ChargingPolicyChangeListener mChargingPolicyChangeListener;
 
@@ -291,6 +300,7 @@ public class JobSchedulerServiceTest {
         doReturn(mock(PlatformCompat.class))
                 .when(() -> ServiceManager.getService(Context.PLATFORM_COMPAT_SERVICE));
 
+        when(mContext.getFilesDir()).thenReturn(mJobStoreFolder.getRoot());
         mJobStore = JobStore.initAndGetForTesting(mContext, mContext.getFilesDir());
         mService = new TestJobSchedulerService(mContext, TEST_MAX_JOBS_PER_APP, mJobStore,
                 mMockPerfettoTracer);
@@ -317,6 +327,65 @@ public class JobSchedulerServiceTest {
         if (mMockingSession != null) {
             mMockingSession.finishMocking();
         }
+    }
+
+    @Test
+    public void testCancelRemovedSagitDolbyJobOnlyRemovesOrphan() {
+        final JobStatus orphan = addLegacyDolbyJob(LEGACY_DOLBY_JOB_ID, LEGACY_DOLBY_CHECKIN,
+                LEGACY_DOLBY_UID, null);
+        final JobStatus otherService = addLegacyDolbyJob(LEGACY_DOLBY_JOB_ID,
+                new ComponentName("com.example", "com.example.JobService"), TEST_UID + 1, null);
+        final JobStatus otherId = addLegacyDolbyJob(LEGACY_DOLBY_JOB_ID + 1, LEGACY_DOLBY_CHECKIN,
+                LEGACY_DOLBY_UID, null);
+        final JobStatus otherNamespace = addLegacyDolbyJob(LEGACY_DOLBY_JOB_ID,
+                LEGACY_DOLBY_CHECKIN, LEGACY_DOLBY_UID, TEST_NAMESPACE);
+        final JobStatus otherUser = addLegacyDolbyJob(LEGACY_DOLBY_JOB_ID, LEGACY_DOLBY_CHECKIN,
+                UserHandle.getUid(10, LEGACY_DOLBY_UID), null);
+        mJobStore.writeStatusToDiskForTesting();
+
+        mService.cancelRemovedSagitDolbyJob("sagit");
+
+        assertFalse(mJobStore.containsJob(orphan));
+        assertTrue(mJobStore.waitForWriteToCompleteForTesting(5_000L));
+        final JobStore.JobSet restored = new JobStore.JobSet();
+        mJobStore.readJobMapFromDisk(restored, true);
+        assertEquals(4, restored.size());
+        assertNull(restored.get(orphan.getUid(), orphan.getNamespace(), orphan.getJobId()));
+        for (JobStatus kept : new JobStatus[]{otherService, otherId, otherNamespace, otherUser}) {
+            assertTrue(mJobStore.containsJob(kept));
+            assertNotNull(restored.get(kept.getUid(), kept.getNamespace(), kept.getJobId()));
+        }
+    }
+
+    @Test
+    public void testCancelRemovedSagitDolbyJobRetainsKnownPackage() {
+        final JobStatus job = addLegacyDolbyJob(LEGACY_DOLBY_JOB_ID, LEGACY_DOLBY_CHECKIN,
+                TEST_UID, null);
+        when(mPackageManagerInternal.getPackageStateInternal(LEGACY_DOLBY_PACKAGE))
+                .thenReturn(mock(PackageStateInternal.class));
+
+        mService.cancelRemovedSagitDolbyJob("sagit");
+
+        assertTrue(mJobStore.containsJob(job));
+    }
+
+    @Test
+    public void testCancelRemovedSagitDolbyJobRetainsJobOnOtherDevice() {
+        final JobStatus job = addLegacyDolbyJob(LEGACY_DOLBY_JOB_ID, LEGACY_DOLBY_CHECKIN,
+                LEGACY_DOLBY_UID, null);
+
+        mService.cancelRemovedSagitDolbyJob("fuxi");
+
+        assertTrue(mJobStore.containsJob(job));
+    }
+
+    private JobStatus addLegacyDolbyJob(int id, ComponentName service, int uid, String namespace) {
+        final JobStatus job = JobStatus.createFromJobInfo(
+                new JobInfo.Builder(id, service).setPersisted(true).build(), uid,
+                null, UserHandle.getUserId(uid), namespace, null);
+        job.prepareLocked();
+        mJobStore.addForTesting(job);
+        return job;
     }
 
     private Clock getAdvancedClock(Clock clock, long incrementMs) {

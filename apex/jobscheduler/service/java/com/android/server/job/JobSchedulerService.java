@@ -2458,6 +2458,32 @@ public class JobSchedulerService extends com.android.server.SystemService
     }
 
     @VisibleForTesting
+    void cancelRemovedSagitDolbyJob(String device) {
+        if (!"sagit".equals(device)) {
+            return;
+        }
+        final String packageName = "com.motorola.dolby.dolbyui";
+        // Only migrate the old check-in job left by the OTA that removed Motorola Dolby.
+        // Global package state survives user lock, per-user disablement and an unmounted volume.
+        if (mLocalPM.getPackageStateInternal(packageName) != null) {
+            return;
+        }
+        final ComponentName service = new ComponentName(packageName,
+                packageName + ".checkin.CheckinSchedulerService");
+        synchronized (mLock) {
+            mJobs.forEachJob(job -> job.isPersisted()
+                            && job.getJobId() == 555805291
+                            && job.getNamespace() == null
+                            && job.getUserId() == UserHandle.USER_SYSTEM
+                            && job.getUid() == job.getSourceUid()
+                            && service.equals(job.getServiceComponent())
+                            && packageName.equals(job.getSourcePackageName()),
+                    job -> cancelJobImplLocked(job, null, JobParameters.STOP_REASON_USER,
+                            JobParameters.INTERNAL_STOP_REASON_UNINSTALL, "removed sagit Dolby"));
+        }
+    }
+
+    @VisibleForTesting
     void cancelJobsForPackageAndUidLocked(String pkgName, int pkgUid, int pccUid,
             boolean includeSchedulingApp, boolean includeSourceApp,
             @JobParameters.StopReason int reason, int internalReasonCode, String debugReason) {
@@ -3147,6 +3173,7 @@ public class JobSchedulerService extends com.android.server.SystemService
 
             // Remove any jobs that are not associated with any of the current users.
             cancelJobsForNonExistentUsers();
+            cancelRemovedSagitDolbyJob(Build.DEVICE);
 
             for (int i = mJobRestrictions.size() - 1; i >= 0; i--) {
                 mJobRestrictions.get(i).onSystemServicesReady();

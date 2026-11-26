@@ -18,3 +18,12 @@ as of http://ag/9145619.
   put on the device and loaded by Zygote.
 
 The current structure is *not* the final design.
+
+## Downstream OTA migration
+
+On sagit, the boot phase after persisted jobs load cancels user 0's legacy
+Motorola Dolby check-in job (`555805291`, default namespace) when PackageManager
+no longer has a package state for `com.motorola.dolby.dolbyui`. Normal JobStore
+writeback removes the orphan from disk so subsequent boots do not load it.
+This is not a general missing-service sweep: a package can be known to
+PackageManager while its service is temporarily unavailable.

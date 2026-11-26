@@ -9,6 +9,15 @@ Inputs directed at sysui (as opposed to general listeners) generally come in
 through IStatusBar. Outputs from sysui are through a variety of private APIs to
 the android platform all over.
 
+## Notification backdrop blur
+
+`NotificationBackgroundView` uses the Java-callable Kotlin `AxBackdropBlur` to
+request a single cross-window region. It uses the existing notification styling,
+feature flags and WindowManager capability state; when a region cannot be drawn,
+it draws the normal notification background. The region is released when the
+view is disabled, hidden or detached. SurfaceFlinger chooses the filter, so
+SystemUI needs no GlassBlur-specific setting or rendering backend.
+
 ## SystemUIApplication
 
 When SystemUIApplication starts up, it instantiates a Dagger graph from which

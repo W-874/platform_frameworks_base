@@ -24,7 +24,6 @@ import android.graphics.RectF
 import android.platform.test.annotations.DisableFlags
 import android.platform.test.annotations.EnableFlags
 import android.testing.TestableLooper.RunWithLooper
-import android.testing.ViewUtils
 import android.view.View
 import android.widget.FrameLayout
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -40,7 +39,6 @@ import com.android.systemui.statusbar.notification.SourceType
 import com.android.systemui.util.mockito.mock
 import com.google.common.truth.Truth.assertThat
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.verify
@@ -169,13 +167,12 @@ class ActivatableNotificationViewTest : SysuiTestCase() {
     }
 
     @Test
-    @Ignore("TODO(b/469142819) - Determine how to get robolectric looper work with this")
     @EnableFlags(
         Flags.FLAG_NOTIFICATION_ROW_TRANSPARENCY,
         Flags.FLAG_LOCKSCREEN_BLUR_FOR_NOTIFICATIONS
     )
-    fun testBackgroundBehaviorsWithBlur() {
-        mView = TestActivatableNotificationView(context, useRealNotificationBackgroundView = true)
+    fun testBackgroundBehaviorsWhenBlurIsSupported() {
+        mView = TestActivatableNotificationView(mContext, useRealNotificationBackgroundView = true)
 
         mView.updateBackgroundColors()
         assertThat(mView.currentBackgroundTint).isEqualTo(mOpaqueColor)
@@ -191,11 +188,15 @@ class ActivatableNotificationViewTest : SysuiTestCase() {
 
         // Verify this enables the blurred background color.
         mView.setIsBlurSupported(true)
+        assertThat(mView.mNotificationBackgroundView.isBlurRequested).isTrue()
         assertThat(mView.currentBackgroundTint).isEqualTo(mSurfaceEffectColor)
 
-        ViewUtils.attachView(mView.mContentView)
-        waitForIdleSync()
-        assertThat(mView.hasBlur()).isTrue()
+        // A view does not allocate a compositor region until a hardware draw needs it.
+        assertThat(mView.hasBlur()).isFalse()
+
+        mView.setIsBlurSupported(false)
+        assertThat(mView.mNotificationBackgroundView.isBlurRequested).isFalse()
+        assertThat(mView.currentBackgroundTint).isEqualTo(mOpaqueColor)
     }
 
     @Test

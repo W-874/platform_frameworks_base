@@ -17,7 +17,6 @@
 package com.android.systemui.volume.panel.component.devicesetting.ui.composable
 
 import android.view.Gravity
-import androidx.annotation.VisibleForTesting
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -27,7 +26,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -36,7 +34,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEachIndexed
 import com.android.settingslib.bluetooth.devicesettings.shared.model.DeviceSettingModel
 import com.android.settingslib.bluetooth.devicesettings.shared.model.DeviceSettingStateModel
-import com.android.settingslib.bluetooth.devicesettings.shared.model.ToggleModel
 import com.android.systemui.animation.Expandable
 import com.android.systemui.bluetooth.devicesettings.shared.model.toSysUiIcon
 import com.android.systemui.common.ui.compose.Icon
@@ -58,47 +55,51 @@ constructor(
 ) {
 
     /** Shows a popup with the [expandable] animation. */
-    fun show(expandable: Expandable, horizontalGravity: Int) {
+    fun show(
+        expandable: Expandable,
+        horizontalGravity: Int,
+        anchor: DeviceSettingModel.MultiTogglePreference,
+    ) {
         val gravity = horizontalGravity or Gravity.BOTTOM
-        volumePanelPopup.show(expandable, gravity, body = { Body(it) })
+        volumePanelPopup.show(expandable, gravity, body = { Body(it, anchor) })
     }
 
     @Composable
-    @VisibleForTesting
-    fun Body(dialog: SystemUIDialog) {
+    private fun Body(dialog: SystemUIDialog, anchor: DeviceSettingModel.MultiTogglePreference) {
         val viewModel = rememberViewModel("DeviceSettingPopup#viewModel") { viewModelFactory() }
-        viewModel.setting?.let { setting ->
-            Box(
-                modifier = Modifier.padding(horizontal = 80.dp).fillMaxWidth().wrapContentHeight(),
-                contentAlignment = Alignment.Center,
-            ) {
-                VolumePanelPopupDefaults.Title(setting.label)
-            }
-
-            Box(
-                modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth().wrapContentHeight(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Content(dialog, setting)
-            }
-        }
-    }
-
-    @Composable
-    private fun Content(dialog: SystemUIDialog, setting: DeviceSettingModel) {
-        val togglesSetting = setting.ensureToggle()
-        val toggles = togglesSetting?.toggles
-        if (toggles.isNullOrEmpty()) {
+        val setting = viewModel.setting as? DeviceSettingModel.MultiTogglePreference
+        if (
+            setting == null || setting.cachedDevice != anchor.cachedDevice ||
+                setting.id != anchor.id || !setting.isAllowedChangingState ||
+                setting.state.selectedIndex !in setting.toggles.indices
+        ) {
             SideEffect { dialog.dismiss() }
             return
         }
 
+        Box(
+            modifier = Modifier.padding(horizontal = 80.dp).fillMaxWidth().wrapContentHeight(),
+            contentAlignment = Alignment.Center,
+        ) {
+            VolumePanelPopupDefaults.Title(setting.title)
+        }
+
+        Box(
+            modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth().wrapContentHeight(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Content(setting)
+        }
+    }
+
+    @Composable
+    private fun Content(setting: DeviceSettingModel.MultiTogglePreference) {
         VolumePanelRadioButtonBar {
-            toggles.fastForEachIndexed { index, toggleModel ->
+            setting.toggles.fastForEachIndexed { index, toggleModel ->
                 item(
-                    isSelected = index == togglesSetting.state.selectedIndex,
+                    isSelected = index == setting.state.selectedIndex,
                     onItemSelected = {
-                        togglesSetting.updateState(
+                        setting.updateState(
                             DeviceSettingStateModel.MultiTogglePreferenceState(index)
                         )
                     },
@@ -127,55 +128,3 @@ constructor(
         fun create(viewModelFactory: () -> DeviceSettingComponentViewModel): DeviceSettingPopup
     }
 }
-
-private val DeviceSettingModel.label
-    get() =
-        when (this) {
-            is DeviceSettingModel.MultiTogglePreference -> title
-            is DeviceSettingModel.ActionSwitchPreference -> title
-            else -> error("Unsupported setting type: $this")
-        }
-
-/**
- * Ensures that the [DeviceSettingModel] is [DeviceSettingModel.MultiTogglePreference] by converting
- * [DeviceSettingModel.ActionSwitchPreference] to [DeviceSettingModel.MultiTogglePreference] when
- * needed. Returns null when the [DeviceSettingModel] is not supported.
- */
-@Composable
-private fun DeviceSettingModel.ensureToggle(): DeviceSettingModel.MultiTogglePreference? =
-    remember(this) {
-        when (this) {
-            is DeviceSettingModel.MultiTogglePreference -> this
-            is DeviceSettingModel.ActionSwitchPreference -> {
-                val active = 1
-                val inactive = 0
-                val isActive = switchState?.checked == true
-                DeviceSettingModel.MultiTogglePreference(
-                    isAllowedChangingState = isAllowedChangingState,
-                    isActive = isActive,
-                    title = title,
-                    state =
-                        DeviceSettingStateModel.MultiTogglePreferenceState(
-                            if (isActive) active else inactive
-                        ),
-                    id = id,
-                    cachedDevice = cachedDevice,
-                    updateState = {
-                        updateState?.invoke(
-                            DeviceSettingStateModel.ActionSwitchPreferenceState(
-                                it.selectedIndex == active
-                            )
-                        )
-                    },
-                    toggles =
-                        icon?.let { icon ->
-                            listOf(
-                                ToggleModel(icon = icon, label = label),
-                                ToggleModel(icon = icon, label = label),
-                            )
-                        } ?: emptyList(),
-                )
-            }
-            else -> null
-        }
-    }

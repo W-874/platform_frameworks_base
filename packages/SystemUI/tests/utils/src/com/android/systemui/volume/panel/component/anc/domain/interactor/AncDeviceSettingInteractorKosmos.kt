@@ -18,6 +18,7 @@ package com.android.systemui.volume.panel.component.anc.domain.interactor
 
 import com.android.systemui.bluetooth.devicesettings.data.repository.deviceSettingRepository
 import com.android.systemui.kosmos.Kosmos
+import com.android.systemui.kosmos.applicationCoroutineScope
 import com.android.systemui.volume.domain.interactor.audioOutputInteractor
 
 val Kosmos.ancDeviceSettingInteractor by
@@ -25,5 +26,6 @@ val Kosmos.ancDeviceSettingInteractor by
         AncDeviceSettingInteractor(
             audioOutputInteractor = audioOutputInteractor,
             deviceSettingRepository = deviceSettingRepository,
+            scope = applicationCoroutineScope,
         )
     }

@@ -100,9 +100,11 @@ constructor(
                     isActive = setting.isActive,
                     isEnabled = setting.isAllowedChangingState,
                     onClick = { expandable ->
-                        popupFactory
-                            .create(viewModelFactory)
-                            .show(expandable = expandable, horizontalGravity = gravity)
+                        popupFactory.create(viewModelFactory).show(
+                            expandable = expandable,
+                            horizontalGravity = gravity,
+                            anchor = setting,
+                        )
                     },
                     semantics = {
                         role = Role.Button

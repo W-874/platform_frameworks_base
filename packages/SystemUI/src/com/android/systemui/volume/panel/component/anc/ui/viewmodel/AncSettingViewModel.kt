@@ -28,7 +28,7 @@ class AncSettingViewModel @AssistedInject constructor(interactor: AncDeviceSetti
     HydratedActivatable(), DeviceSettingComponentViewModel {
 
     override val setting: DeviceSettingModel? by
-        interactor.getSetting().hydratedStateOf("ancSetting", null)
+        interactor.getSetting().hydratedStateOf("ancSetting")
 
     @AssistedFactory
     interface Factory {

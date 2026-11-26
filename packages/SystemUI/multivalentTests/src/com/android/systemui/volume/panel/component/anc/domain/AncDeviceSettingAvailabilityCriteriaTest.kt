@@ -37,6 +37,7 @@ import com.android.systemui.volume.domain.model.AudioOutputDevice
 import com.android.systemui.volume.localMediaController
 import com.android.systemui.volume.localMediaRepository
 import com.android.systemui.volume.mediaControllerRepository
+import com.android.systemui.volume.panel.component.anc.domain.interactor.ancDeviceSettingInteractor
 import com.android.systemui.volume.panel.component.mediaoutput.domain.interactor.TestMediaDevicesFactory
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
@@ -110,6 +111,62 @@ class AncDeviceSettingAvailabilityCriteriaTest : SysuiTestCase() {
             }
 
             assertThat(isAvailable).isTrue()
+        }
+
+    @Test
+    fun switchesOutputAndRejectsClicksFromOldRoute() =
+        kosmos.runTest {
+            val setting by collectLastValue(ancDeviceSettingInteractor.getSetting())
+            val device by collectLastValue(audioOutputInteractor.currentAudioDevice)
+            val first = (device as AudioOutputDevice.Bluetooth).cachedBluetoothDevice
+            val secondMediaDevice = TestMediaDevicesFactory.bluetoothMediaDevice(deviceAddress = "second")
+            val second = secondMediaDevice.cachedDevice
+            var firstUpdates = 0
+            var secondUpdates = 0
+            val anc = DeviceSettingId.DEVICE_SETTING_ID_ANC
+            val options = listOf(
+                ToggleModel(label = "Off", icon = DeviceSettingIcon.ResourceIcon(Resources.ID_NULL)),
+                ToggleModel(label = "On", icon = DeviceSettingIcon.ResourceIcon(Resources.ID_NULL)),
+            )
+            val firstModel = DeviceSettingModel.MultiTogglePreference(
+                cachedDevice = first,
+                id = anc,
+                title = "Noise cancellation",
+                toggles = options,
+                isActive = false,
+                state = DeviceSettingStateModel.MultiTogglePreferenceState(0),
+                isAllowedChangingState = true,
+                updateState = { firstUpdates++ },
+            )
+            fakeDeviceSettingRepository.updateDeviceSetting(first, anc) { firstModel }
+            val firstRendered = setting as DeviceSettingModel.MultiTogglePreference
+            firstRendered.updateState(DeviceSettingStateModel.MultiTogglePreferenceState(1))
+            assertThat(firstUpdates).isEqualTo(1)
+
+            fakeDeviceSettingRepository.updateDeviceSetting(first, anc) {
+                firstModel.copy(toggles = options.reversed())
+            }
+            assertThat((setting as DeviceSettingModel.MultiTogglePreference).toggles)
+                .containsExactlyElementsIn(options.reversed()).inOrder()
+            firstRendered.updateState(DeviceSettingStateModel.MultiTogglePreferenceState(1))
+            assertThat(firstUpdates).isEqualTo(1)
+
+            localMediaRepository.updateCurrentConnectedDevice(secondMediaDevice)
+            assertThat(setting).isNull()
+            fakeDeviceSettingRepository.updateDeviceSetting(second, anc) {
+                firstModel.copy(cachedDevice = second, updateState = { secondUpdates++ })
+            }
+            val secondRendered = setting as DeviceSettingModel.MultiTogglePreference
+            assertThat(secondRendered.cachedDevice).isEqualTo(second)
+            firstRendered.updateState(DeviceSettingStateModel.MultiTogglePreferenceState(1))
+            secondRendered.updateState(DeviceSettingStateModel.MultiTogglePreferenceState(1))
+            assertThat(firstUpdates).isEqualTo(1)
+            assertThat(secondUpdates).isEqualTo(1)
+
+            localMediaRepository.updateCurrentConnectedDevice(TestMediaDevicesFactory.builtInMediaDevice())
+            assertThat(setting).isNull()
+            secondRendered.updateState(DeviceSettingStateModel.MultiTogglePreferenceState(1))
+            assertThat(secondUpdates).isEqualTo(1)
         }
 
     @Test

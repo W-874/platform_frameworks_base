@@ -16,7 +16,9 @@
 
 package com.android.settingslib.bluetooth.devicesettings.data.repository
 
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -54,7 +56,9 @@ import com.android.settingslib.bluetooth.devicesettings.shared.model.DeviceSetti
 import com.android.settingslib.bluetooth.devicesettings.shared.model.DeviceSettingStateModel
 import com.android.settingslib.bluetooth.devicesettings.shared.model.ToggleModel
 import com.google.common.truth.Truth.assertThat
+import java.util.concurrent.Executor
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.test.TestScope
@@ -71,6 +75,7 @@ import org.mockito.ArgumentMatchers.anyString
 import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mock
 import org.mockito.Mockito.doReturn
+import org.mockito.Mockito.mock
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.junit.MockitoJUnit
@@ -290,6 +295,51 @@ class DeviceSettingRepositoryTest {
             runCurrent()
 
             assertDeviceSetting(setting!!, DEVICE_SETTING_2)
+        }
+    }
+
+    @Test
+    fun getDeviceSetting_discoversProviderAfterMetadataArrives() {
+        testScope.runTest {
+            val adapter = mock(BluetoothAdapter::class.java)
+            val manager = mock(BluetoothManager::class.java)
+            val directExecutor = Executor { it.run() }
+            val metadataKey = DeviceSettingServiceConnection.METADATA_FAST_PAIR_CUSTOMIZED_FIELDS
+            lateinit var listener: BluetoothAdapter.OnMetadataChangedListener
+            `when`(context.getSystemService(BluetoothManager::class.java)).thenReturn(manager)
+            `when`(context.mainExecutor).thenReturn(directExecutor)
+            `when`(manager.adapter).thenReturn(adapter)
+            `when`(adapter.addOnMetadataChangedListener(any(), any(), any())).then { call ->
+                assertThat(call.getArgument<BluetoothDevice>(0)).isEqualTo(bluetoothDevice)
+                listener = call.getArgument(2)
+                true
+            }
+            var metadata: ByteArray? = null
+            `when`(bluetoothDevice.getMetadata(metadataKey)).then { metadata }
+            setUpConfigService(true, DEVICE_SETTING_CONFIG)
+            setUpProviderService(settingProviderService1, true, listOf())
+            setUpProviderService(settingProviderService2, true, listOf(DEVICE_SETTING_2))
+            var setting: DeviceSettingModel? = null
+
+            val job = underTest
+                .getDeviceSetting(cachedDevice, DeviceSettingId.DEVICE_SETTING_ID_ANC)
+                .onEach { setting = it }
+                .launchIn(backgroundScope)
+            runCurrent()
+            assertThat(setting).isNull()
+
+            metadata = BLUETOOTH_DEVICE_METADATA.toByteArray()
+            listener.onMetadataChanged(mock(BluetoothDevice::class.java), metadataKey, metadata)
+            listener.onMetadataChanged(bluetoothDevice, BluetoothDevice.METADATA_MAIN_BATTERY, metadata)
+            runCurrent()
+            assertThat(setting).isNull()
+
+            listener.onMetadataChanged(bluetoothDevice, metadataKey, metadata)
+            runCurrent()
+            assertDeviceSetting(setting!!, DEVICE_SETTING_2)
+
+            job.cancelAndJoin()
+            verify(adapter).removeOnMetadataChangedListener(bluetoothDevice, listener)
         }
     }
 

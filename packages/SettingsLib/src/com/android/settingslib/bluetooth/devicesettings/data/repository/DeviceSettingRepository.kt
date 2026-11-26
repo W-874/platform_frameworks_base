@@ -51,9 +51,14 @@ import com.google.common.cache.CacheLoader
 import com.google.common.cache.LoadingCache
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Provides functionality to control bluetooth device settings. */
 interface DeviceSettingRepository {
@@ -69,37 +74,59 @@ interface DeviceSettingRepository {
     ): Flow<DeviceSettingModel?>
 }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class DeviceSettingRepositoryImpl(
     private val context: Context,
     private val coroutineScope: CoroutineScope,
     private val backgroundCoroutineContext: CoroutineContext,
 ) : DeviceSettingRepository {
-    private val connectionCache:
-            LoadingCache<CachedBluetoothDevice, DeviceSettingServiceConnection> =
+    private data class ConnectionKey(
+        val device: CachedBluetoothDevice,
+        val endpoint: DeviceSettingServiceConnection.EndPoint,
+    )
+
+    private val connectionCache: LoadingCache<ConnectionKey, DeviceSettingServiceConnection> =
         CacheBuilder.newBuilder()
             .weakValues()
-            .build(object : CacheLoader<CachedBluetoothDevice, DeviceSettingServiceConnection>() {
-                override fun load(
-                    cachedDevice: CachedBluetoothDevice
-                ): DeviceSettingServiceConnection = DeviceSettingServiceConnection(
-                    cachedDevice,
-                    context,
-                    coroutineScope,
-                    backgroundCoroutineContext,
-                )
+            .build(object : CacheLoader<ConnectionKey, DeviceSettingServiceConnection>() {
+                override fun load(key: ConnectionKey): DeviceSettingServiceConnection =
+                    DeviceSettingServiceConnection(
+                        key.device,
+                        context,
+                        coroutineScope,
+                        backgroundCoroutineContext,
+                        key.endpoint,
+                    )
             })
 
     override suspend fun getDeviceSettingsConfig(
         cachedDevice: CachedBluetoothDevice
-    ): DeviceSettingConfigModel? =
-        connectionCache.get(cachedDevice).getDeviceSettingsConfig()?.toModel()
+    ): DeviceSettingConfigModel? {
+        val endpoint = withContext(backgroundCoroutineContext) {
+            DeviceSettingServiceConnection.getConfigEndpoint(cachedDevice.device)
+        } ?: return null
+        return connectionCache.get(ConnectionKey(cachedDevice, endpoint))
+            .getDeviceSettingsConfig()?.toModel()
+    }
 
     override fun getDeviceSetting(
         cachedDevice: CachedBluetoothDevice,
         settingId: Int,
-    ): Flow<DeviceSettingModel?> = connectionCache.get(cachedDevice).let { connection ->
-        connection.getDeviceSetting(settingId).map { it?.toModel(cachedDevice, connection) }
-    }
+    ): Flow<DeviceSettingModel?> =
+        DeviceSettingServiceConnection.observeConfigEndpoint(
+            context,
+            cachedDevice.device,
+            backgroundCoroutineContext,
+        ).flatMapLatest { endpoint ->
+            if (endpoint == null) {
+                flowOf(null)
+            } else {
+                val connection = connectionCache.get(ConnectionKey(cachedDevice, endpoint))
+                connection.getDeviceSetting(settingId)
+                    .map { it?.toModel(cachedDevice, connection) }
+                    .onStart { emit(null) }
+            }
+        }
 
     private fun DeviceSettingsConfig.toModel(): DeviceSettingConfigModel = DeviceSettingConfigModel(
         mainItems = getDeviceSettingLayout(mainContentItems, settingGroups),

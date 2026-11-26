@@ -16,6 +16,9 @@
 
 package com.android.settingslib.bluetooth.devicesettings.data.repository
 
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -56,6 +59,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
@@ -74,7 +78,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DeviceSettingServiceConnection(
@@ -82,6 +85,7 @@ class DeviceSettingServiceConnection(
     private val context: Context,
     private val coroutineScope: CoroutineScope,
     private val backgroundCoroutineContext: CoroutineContext,
+    private val configEndpoint: EndPoint,
 ) {
     data class EndPoint(
         private val packageName: String?,
@@ -143,12 +147,7 @@ class DeviceSettingServiceConnection(
 
     private var config =
         coroutineScope.async(backgroundCoroutineContext, start = CoroutineStart.LAZY) {
-            val intent =
-                tryGetEndpointFromMetadata(cachedDevice)?.toIntent()
-                    ?: run {
-                        Log.i(TAG, "Unable to read device setting metadata from $cachedDevice")
-                        return@async null
-                    }
+            val intent = configEndpoint.toIntent() ?: return@async null
             getService(intent, IDeviceSettingsConfigProviderService.Stub::asInterface)
                 .flatMapConcat {
                     when (it) {
@@ -235,7 +234,10 @@ class DeviceSettingServiceConnection(
             return
         }
         services
-            .map { getSettingsFromStatus(it) }
+            .map { status ->
+                status.filterIsInstance<ServiceConnectionStatus.Connected<IDeviceSettingsProviderService>>()
+                    .flatMapLatest { getDeviceSettingsFromService(it.service) }
+            }
             .let { items -> combine(items) { it.toList().flatten() } }
             .first()
     }
@@ -244,6 +246,7 @@ class DeviceSettingServiceConnection(
         flow {
                 if (!isServiceEnabled.await()) {
                     Log.w(TAG, "Service is disabled")
+                    emit(emptyMap())
                     return@flow
                 }
                 val services = getSettingsProviderServices(includeOptional = true)?.values
@@ -257,7 +260,11 @@ class DeviceSettingServiceConnection(
                     .map { items -> items.associateBy { it.settingId } }
                     .let { emitAll(it) }
             }
-            .shareIn(scope = coroutineScope, started = SharingStarted.WhileSubscribed(), replay = 1)
+            .shareIn(
+                scope = coroutineScope,
+                started = SharingStarted.WhileSubscribed(replayExpirationMillis = 0),
+                replay = 1,
+            )
 
     /** Gets [DeviceSettingsConfig] for the device, return null when failed. */
     suspend fun getDeviceSettingsConfig(): DeviceSettingsConfig? {
@@ -364,9 +371,12 @@ class DeviceSettingServiceConnection(
     private fun getSettingsFromStatus(
         statusFlow: Flow<ServiceConnectionStatus<IDeviceSettingsProviderService>>
     ): Flow<List<DeviceSetting>> =
-        statusFlow
-            .filterIsInstance<ServiceConnectionStatus.Connected<IDeviceSettingsProviderService>>()
-            .flatMapLatest { getDeviceSettingsFromService(it.service) }
+        statusFlow.flatMapLatest { status ->
+            when (status) {
+                is ServiceConnectionStatus.Connected -> getDeviceSettingsFromService(status.service)
+                else -> flowOf(emptyList())
+            }
+        }
 
     private fun getDeviceSettingsFromService(
         service: IDeviceSettingsProviderService
@@ -405,7 +415,8 @@ class DeviceSettingServiceConnection(
                 .shareIn(
                     coroutineScope,
                     SharingStarted.WhileSubscribed(
-                        stopTimeoutMillis = SERVICE_CONNECTION_STOP_MILLIS
+                        stopTimeoutMillis = SERVICE_CONNECTION_STOP_MILLIS,
+                        replayExpirationMillis = 0,
                     ),
                     replay = 1,
                 )
@@ -446,29 +457,8 @@ class DeviceSettingServiceConnection(
             .flowOn(backgroundCoroutineContext)
     }
 
-    private suspend fun tryGetEndpointFromMetadata(cachedDevice: CachedBluetoothDevice): EndPoint? =
-        withContext(backgroundCoroutineContext) {
-            val packageName =
-                BluetoothUtils.getFastPairCustomizedField(
-                    cachedDevice.device,
-                    CONFIG_SERVICE_PACKAGE_NAME,
-                ) ?: return@withContext null
-            val className =
-                BluetoothUtils.getFastPairCustomizedField(
-                    cachedDevice.device,
-                    CONFIG_SERVICE_CLASS_NAME,
-                ) ?: return@withContext null
-            val intentAction =
-                BluetoothUtils.getFastPairCustomizedField(
-                    cachedDevice.device,
-                    CONFIG_SERVICE_INTENT_ACTION,
-                ) ?: return@withContext null
-            EndPoint(packageName, className, intentAction, false)
-        }
-
-    private inline fun deviceInfo(block: DeviceInfo.Builder.() -> Unit): DeviceInfo {
-        return DeviceInfo.Builder().apply { block() }.build()
-    }
+    private inline fun deviceInfo(block: DeviceInfo.Builder.() -> Unit): DeviceInfo =
+        DeviceInfo.Builder().apply { block() }.build()
 
     companion object {
         const val TAG = "DeviceSettingSrvConn"
@@ -477,5 +467,44 @@ class DeviceSettingServiceConnection(
         const val CONFIG_SERVICE_CLASS_NAME = "DEVICE_SETTINGS_CONFIG_CLASS"
         const val CONFIG_SERVICE_INTENT_ACTION = "DEVICE_SETTINGS_CONFIG_ACTION"
         const val SERVICE_CONNECTION_STOP_MILLIS = 1000L
+
+        internal fun getConfigEndpoint(device: BluetoothDevice): EndPoint? {
+            val packageName = BluetoothUtils.getFastPairCustomizedField(
+                device, CONFIG_SERVICE_PACKAGE_NAME,
+            ) ?: return null
+            val className = BluetoothUtils.getFastPairCustomizedField(
+                device, CONFIG_SERVICE_CLASS_NAME,
+            ) ?: return null
+            val action = BluetoothUtils.getFastPairCustomizedField(
+                device, CONFIG_SERVICE_INTENT_ACTION,
+            ) ?: return null
+            return EndPoint(packageName, className, action, false)
+        }
+
+        internal fun observeConfigEndpoint(
+            context: Context,
+            device: BluetoothDevice,
+            backgroundCoroutineContext: CoroutineContext,
+        ): Flow<EndPoint?> =
+            callbackFlow<Unit> {
+                val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
+                val listener = BluetoothAdapter.OnMetadataChangedListener { changed, key, _ ->
+                    if (changed == device && key == METADATA_FAST_PAIR_CUSTOMIZED_FIELDS) {
+                        trySend(Unit)
+                    }
+                }
+                val listening = adapter?.addOnMetadataChangedListener(
+                    device, context.mainExecutor, listener,
+                ) == true
+                // Subscribe before reading so metadata published during setup isn't missed.
+                trySend(Unit)
+                if (!listening) close()
+                awaitClose {
+                    if (listening) adapter?.removeOnMetadataChangedListener(device, listener)
+                }
+            }
+                .map { getConfigEndpoint(device) }
+                .distinctUntilChanged()
+                .flowOn(backgroundCoroutineContext)
     }
 }

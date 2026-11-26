@@ -63,6 +63,8 @@ final class DozePickupTiltCheck {
     private int mLiveRegistrationFailures;
     private int mFallbackRegistrationFailures;
     private int mConfirmed;
+    private int mHistoryTiltConfirmed;
+    private long mNextHistoryCheckNs;
     private long mLastConfirmedLatencyNs;
     private long mMaxConfirmedLatencyNs;
     private DozePickupMotion.Path mLastPath = DozePickupMotion.Path.NONE;
@@ -76,7 +78,7 @@ final class DozePickupTiltCheck {
         mClock = clock;
         mOnConfirmed = onConfirmed;
         mHistory = new DozePickupSensorHistory(sensors, clock, historyHz, batchMs,
-                this::onHistoryFlushed);
+                this::onHistoryFlushed, this::onFreshBatchSample);
         mMotion = new DozePickupMotion(tiltDegrees, acceleration);
         mSignificantMotion = sensors.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION, true);
         mNonWakeProximity = sensors.getDefaultSensor(Sensor.TYPE_PROXIMITY, false);
@@ -182,6 +184,25 @@ final class DozePickupTiltCheck {
         }
     }
 
+    private void onFreshBatchSample() {
+        if (!isListening() || mWindow != null || mProximityNs == 0 || mNear) return;
+        long nowNs = mClock.elapsedRealtimeNanos();
+        if (nowNs < mNextHistoryCheckNs) return;
+        mNextHistoryCheckNs = nowNs + TimeUnit.MILLISECONDS.toNanos(100);
+        if (!mMotion.classifyHistoryTilt(mHistory.samples(), nowNs,
+                Math.max(mState.evidenceSinceNs(), mProximityNs))
+                || !mState.confirmFromHistory(mMotion.motionStartNs(), mMotion.motionEndNs(),
+                        nowNs)) return;
+        mLastPath = DozePickupMotion.Path.TILT;
+        mHistoryTiltConfirmed++;
+        mConfirmed++;
+        try {
+            mOnConfirmed.run();
+        } finally {
+            mState.finish();
+        }
+    }
+
     private void onHistoryFlushed() {
         if (mWindow != null) {
             evaluate(mWindow, mClock.elapsedRealtimeNanos());
@@ -281,6 +302,7 @@ final class DozePickupTiltCheck {
         pw.println("    evaluated=" + mEvaluations + " withPretriggerHistory="
                 + mEvaluationsWithHistory + " confirmed=" + mConfirmed + " expired=" + mExpired
                 + " liveRegistrationFailures=" + mLiveRegistrationFailures);
+        pw.println("    historyTiltConfirmed=" + mHistoryTiltConfirmed);
         pw.println("    lastConfirmedLatencyMs=" + mLastConfirmedLatencyNs / NS_PER_MS
                 + " maxConfirmedLatencyMs=" + mMaxConfirmedLatencyNs / NS_PER_MS);
         pw.println("    proximity=" + (mProximity == null ? "unregistered"

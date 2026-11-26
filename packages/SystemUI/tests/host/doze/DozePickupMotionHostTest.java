@@ -33,6 +33,7 @@ public final class DozePickupMotionHostTest {
     public static void main(String[] args) {
         quietAndImpacts();
         tiltAcrossPoses();
+        betweenHardwareHints();
         translationAndLookalikes();
         pocketRequiresWithdrawalAndUncover();
         walkingRequiresViewChange();
@@ -78,6 +79,26 @@ public final class DozePickupMotionHostTest {
         check("landscape view uses all three axes", TILT, landscape, 0, 360);
         check("small change in stand inclination", NONE, turn(-120, 80, 42, 51, 440), 0, 400);
         check("tilt without observed settled tail", NONE, turn(-120, 80, 0, 44, 100), 0, 100);
+    }
+
+    private static void betweenHardwareHints() {
+        final DozePickupMotion motion = newMotion();
+        final long now = time(300);
+        expect(motion.classifyHistoryTilt(turn(-180, 40, 0, 44, 300), now, 0),
+                "settled lift between QTI hints");
+        final var state = new DozePickupStateMachine();
+        state.setListening(true, time(-800));
+        expect(state.confirmFromHistory(motion.motionStartNs(), motion.motionEndNs(), now),
+                "consume observed tilt without a QTI window");
+        state.finish();
+        expect(!state.confirmFromHistory(motion.motionStartNs(), motion.motionEndNs(), time(2000)),
+                "the next batch cannot replay the same tilt");
+        expect(!motion.classifyHistoryTilt(turn(-180, 40, 44, 0, 300), now, 0),
+                "setting phone down flat is not an unsolicited pickup");
+        expect(!motion.classifyHistoryTilt(turn(-180, 40, 44, 44, 300), now, 0),
+                "stationary inclined stand needs no QTI to remain quiet");
+        expect(!motion.classifyHistoryTilt(turn(-180, 40, 0, 44, 300), time(900), 0),
+                "old FIFO batch cannot wake the screen");
     }
 
     private static void translationAndLookalikes() {

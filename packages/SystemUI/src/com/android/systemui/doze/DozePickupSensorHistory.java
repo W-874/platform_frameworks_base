@@ -39,6 +39,7 @@ final class DozePickupSensorHistory {
     private final int mPeriodUs;
     private final int mBatchUs;
     private final Runnable mOnFlushCompleted;
+    private final Runnable mOnFreshBatchSample;
     private final DozePickupMotionFeatures.Samples mSamples = new DozePickupMotionFeatures.Samples();
 
     private BatchListener mBatchListener;
@@ -50,10 +51,11 @@ final class DozePickupSensorHistory {
     private int mFlushFailures;
 
     DozePickupSensorHistory(SensorManager sensors, SystemClock clock, int historyHz, int batchMs,
-            Runnable onFlushCompleted) {
+            Runnable onFlushCompleted, Runnable onFreshBatchSample) {
         mSensors = sensors;
         mClock = clock;
         mOnFlushCompleted = onFlushCompleted;
+        mOnFreshBatchSample = onFreshBatchSample;
         mHistorySensor = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER, false);
         mAccelerometer = mHistorySensor != null ? mHistorySensor
                 : sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
@@ -167,7 +169,13 @@ final class DozePickupSensorHistory {
         @Override
         public void onSensorChanged(SensorEvent event) {
             if (mBatchListener == this) {
-                add(event, mClock.elapsedRealtimeNanos());
+                long nowNs = mClock.elapsedRealtimeNanos();
+                add(event, nowNs);
+                // Don't walk a FIFO backlog or dispatch on an old sample being inserted.
+                if (event.timestamp == mSamples.latestNs()
+                        && nowNs - event.timestamp <= MAX_GAP_NS) {
+                    mOnFreshBatchSample.run();
+                }
             }
         }
 

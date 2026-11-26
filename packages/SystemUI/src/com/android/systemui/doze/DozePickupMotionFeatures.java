@@ -216,6 +216,12 @@ final class DozePickupMotionFeatures {
         return start >= 0 && start < mCount && latestNs() - mTime[start] >= duration;
     }
 
+    boolean heldInView(float minimumTiltDot) {
+        // An unsolicited rotation ending flat (including setting the phone down)
+        // isn't a request to see the screen. The QTI paths retain their own rules.
+        return mHeldZ >= 0 && mHeldZ < minimumTiltDot;
+    }
+
     /** Marks sustained, separated footfall-sized pulses, independent of device orientation. */
     void findSteps(float acceleration) {
         mStepCount = 0;

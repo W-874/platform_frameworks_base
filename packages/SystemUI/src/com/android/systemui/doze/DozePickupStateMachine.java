@@ -76,6 +76,19 @@ final class DozePickupStateMachine {
                 || endNs > nowNs || nowNs >= mDeadlineNs) {
             return false;
         }
+        return consume(endNs, nowNs);
+    }
+
+    boolean confirmFromHistory(long startNs, long endNs, long nowNs) {
+        if ((mState != State.ARMED && mState != State.REFRACTORY)
+                || startNs < mListenStartNs || startNs <= evidenceSinceNs()
+                || endNs < startNs || endNs > nowNs || nowNs < mCooldownUntilNs) {
+            return false;
+        }
+        return consume(endNs, nowNs);
+    }
+
+    private boolean consume(long endNs, long nowNs) {
         mConsumedEndNs = endNs;
         mCooldownUntilNs = nowNs + COOLDOWN_NS;
         mState = State.TRIGGERED;

@@ -91,6 +91,23 @@ final class DozePickupMotion {
         return Path.NONE;
     }
 
+    /** A recent, settled tilt into a viewing pose, without a hardware hint. */
+    boolean classifyHistoryTilt(DozePickupMotionFeatures.Samples samples, long nowNs,
+            long sinceNs) {
+        if (!mFeatures.load(samples, nowNs, sinceNs)) return false;
+        final int held = mFeatures.heldPose(false);
+        if (!mFeatures.heldFor(held, TILT_HOLD_NS) || !mFeatures.heldInView(mTiltDot)) {
+            return false;
+        }
+        final int turn = mFeatures.turn(held, nowNs - ms(WINDOW_MS), mTiltDot,
+                ms(130), 0.995f, 2.5f);
+        if (turn < 0) return false;
+        mFeatures.findSteps(mAcceleration);
+        if (mFeatures.hasCadence(mFeatures.timestamp(turn))) return false;
+        confirm(Path.TILT, turn);
+        return true;
+    }
+
     /** First corroborating motion and last observed hold sample, or -1 after a miss. */
     long motionStartNs() {
         return mMotionStartNs;

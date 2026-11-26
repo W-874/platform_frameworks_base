@@ -724,6 +724,35 @@ public class BroadcastQueueTest extends BaseBroadcastQueueTest {
         verifyScheduleReceiver(receiverApp, intent);
     }
 
+    @Test
+    public void testMiPushArrivalThawsOnlyResolvedReceiverBeforeDispatch() throws Exception {
+        final ProcessRecord caller = new ActiveProcBuilder(PACKAGE_RED).build();
+        final ProcessRecord client = new ActiveProcBuilder(PACKAGE_GREEN).build();
+        final ProcessRecord unrelated = new ActiveProcBuilder(PACKAGE_BLUE).build();
+        synchronized (mAms.mProcLock) {
+            client.mOptRecord.setFrozen(true);
+            unrelated.mOptRecord.setFrozen(true);
+        }
+        final byte[] payload = {1, 2, 3};
+        final Intent arrival = new Intent("com.xiaomi.mipush.MESSAGE_ARRIVED")
+                .setPackage(PACKAGE_GREEN).putExtra("mipush_payload", payload);
+        enqueueBroadcast(makeBroadcastRecord(arrival, caller,
+                List.of(makeManifestReceiver(PACKAGE_GREEN, CLASS_GREEN))));
+
+        waitForIdle();
+
+        final var order = inOrder(mAms, client.getThread());
+        order.verify(mAms, atLeastOnce()).unfreezeTemporarily(client, OOM_ADJ_REASON_START_RECEIVER);
+        order.verify(client.getThread()).scheduleReceiver(
+                argThat(intent -> filterEqualsIgnoringComponent(arrival).matches(intent)
+                        && Arrays.equals(payload, intent.getByteArrayExtra("mipush_payload"))),
+                any(), any(), anyInt(), any(), any(), eq(false), anyBoolean(),
+                eq(UserHandle.USER_SYSTEM), anyInt(), anyInt(), any());
+        verify(mAms, never()).unfreezeTemporarily(caller, OOM_ADJ_REASON_START_RECEIVER);
+        verify(mAms, never()).unfreezeTemporarily(eq(unrelated), anyInt());
+        verifyScheduleReceiver(never(), unrelated, arrival);
+    }
+
     /**
      * Verify dispatch of multiple broadcasts to multiple manifest receivers in
      * already-running warm apps.

@@ -1565,7 +1565,7 @@ public final class ProcessList extends ProcessListInternal
         buf.putInt(LMK_PROCS_PRIO);
         for (int i = 0; i < totalApps; i++) {
             final int pid = apps.get(i).getPid();
-            final int amt = apps.get(i).getCurAdj();
+            final int amt = apps.get(i).getLmkdAdj();
             final int uid = apps.get(i).uid;
             if (pid <= 0 || amt == UNKNOWN_ADJ) continue;
             if (total_procs_in_buf >= MAX_PROCS_PRIO_PACKET_SIZE) {

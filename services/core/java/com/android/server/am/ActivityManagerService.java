@@ -4413,17 +4413,16 @@ public class ActivityManagerService extends IActivityManager.Stub
         }
     }
 
-    long releaseAxMemory(int minAdj, int count, boolean cachedActivities, boolean rankByRss,
-            String reason) {
+    long releaseAxMemory(int userId, int minAdj, int count, boolean cachedActivities,
+            boolean rankByRss, String reason) {
         long rssKb = 0;
         synchronized (mGlobalLock) {
             synchronized (mProcLock) {
+                if (!mAxMemory.isEnabledForUser(userId)) return 0;
                 final ProcessRecord top = getTopApp();
-                final var candidates = AxMemoryManager.rankVictims(
-                        mProcessList.getLruProcessesLOSP(), top, minAdj, cachedActivities, rankByRss);
-                final int currentUser = mUserController.getCurrentUserId();
+                final var candidates = AxMemoryManager.rankVictims(mProcessList.getLruProcessesLOSP(),
+                        top, userId, minAdj, cachedActivities, rankByRss);
                 for (ProcessRecord app : candidates) {
-                    if (app.userId != currentUser) continue;
                     rssKb += Math.max(0, app.getLastRss());
                     app.killLocked("ax memory: " + reason, ApplicationExitInfo.REASON_OTHER,
                             ApplicationExitInfo.SUBREASON_MEMORY_PRESSURE, true);
@@ -4466,7 +4465,8 @@ public class ActivityManagerService extends IActivityManager.Stub
             synchronized (mProcLock) {
                 if (app.getStartSeq() != startSeq || !app.mAxPrefork) return;
                 mAxMemory.clearPrefork(app);
-                if (getProcessRecordLocked(app.processName, app.uid) == app && app.getPid() > 0
+                if (mAxMemory.isEnabledForUser(app.userId)
+                        && getProcessRecordLocked(app.processName, app.uid) == app && app.getPid() > 0
                         && !app.hasActivities() && !app.getHasStartedServices()
                         && !app.mReceivers.isReceivingBroadcast()
                         && app.getProcState() == ActivityManager.PROCESS_STATE_CACHED_EMPTY
@@ -4482,10 +4482,12 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     void updateAxMemoryOomAdj() {
         synchronized (mGlobalLock) {
+            synchronized (mProcLock) {
+                mAxMemory.clearInactivePreforks();
+            }
             updateOomAdjLocked(OOM_ADJ_REASON_UI_VISIBILITY);
         }
     }
-
 
     /**
      * Kills all background processes, except those matching any of the

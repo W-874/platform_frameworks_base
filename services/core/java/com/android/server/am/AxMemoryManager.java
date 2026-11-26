@@ -61,7 +61,7 @@ final class AxMemoryManager {
     private static final Set<String> PROTECTED_PACKAGES = Set.of("com.android.systemui",
             "com.android.launcher3", "com.google.android.apps.nexuslauncher", "com.android.launcher",
             "com.android.axion.gamespace", "com.android.settings", "com.android.phone",
-            "com.google.android.gms", "com.android.chrome");
+            "com.google.android.gms", "com.android.chrome", "com.xiaomi.xmsf");
 
     private final ActivityManagerService mAm;
     final long mRamBytes = Process.getTotalMemory();
@@ -72,14 +72,16 @@ final class AxMemoryManager {
     private volatile boolean mEnabled;
     private volatile Ranking mRanking = new Ranking(NO_USER, Map.of());
     private volatile App mTopCamera;
-    private volatile long mCameraUntil;
-    private long mLastScreen, mLastFace, mLastCamera; // AMS locks; stored as deadlines
+    private volatile CameraStart mCameraStart;
+    private long mLastScreen, mLastFace, mLastCamera; // AMS handler; stored as deadlines
+    private int mReleaseUser = NO_USER; // AMS handler only
     private int mPreforkUser = NO_USER; // background handler only
     private long mLastPreforkUptime; // background handler only
-    private volatile boolean mHomeFocused;
+    private volatile int mHomeFocusedUser = NO_USER;
 
     private record App(int uid, String pkg) {}
     private record Rank(int adj, long pss) {}
+    private record CameraStart(int userId, long until) {}
     private record Ranking(int userId, Map<App, Rank> ranks) {}
     private record Candidate(ProcessRecord app, int adj, long rss) {}
     private enum Release { CAMERA, FACE, SCREEN, EXPLICIT }
@@ -104,8 +106,11 @@ final class AxMemoryManager {
             @Override
             public void onReceive(Context context, Intent intent) {
                 if (Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
-                    mAm.mHandler.post(() -> releaseForEvent(Release.SCREEN, false));
+                    postRelease(Release.SCREEN, false, mAm.mUserController.getCurrentUserId());
                 } else if (mEnabled) {
+                    if (Intent.ACTION_USER_SWITCHED.equals(intent.getAction())) {
+                        mAm.mHandler.post(mAm::updateAxMemoryOomAdj);
+                    }
                     scheduleRefresh(30_000);
                 }
             }
@@ -114,13 +119,17 @@ final class AxMemoryManager {
     }
 
     private void updateEnabled() {
-        mEnabled = Settings.Global.getInt(mAm.mContext.getContentResolver(), ENABLED_SETTING, 1)
-                != 0;
+        final boolean enabledByDefault = mAm.mContext.getResources().getBoolean(
+                com.android.internal.R.bool.config_axMemoryPolicyEnabledByDefault);
+        mEnabled = Settings.Global.getInt(mAm.mContext.getContentResolver(), ENABLED_SETTING,
+                enabledByDefault ? 1 : 0) != 0;
         if (mEnabled) {
             scheduleRefresh(30_000);
         } else {
             BackgroundThread.getHandler().removeCallbacks(mRefresh);
             mRanking = new Ranking(NO_USER, Map.of());
+            mTopCamera = null;
+            mCameraStart = null;
             mPreforkUser = NO_USER;
             mAm.mHandler.post(mAm::updateAxMemoryOomAdj);
         }
@@ -198,17 +207,19 @@ final class AxMemoryManager {
             }
         }
         if (mAm.mUserController.getCurrentUserId() == user) {
-            mRanking = new Ranking(user, Map.copyOf(ranks));
+            final Ranking ranking = new Ranking(user, Map.copyOf(ranks));
+            mRanking = ranking;
             mAm.mHandler.post(mAm::updateAxMemoryOomAdj);
             final long uptime = SystemClock.uptimeMillis();
-            if (mPreforkUser != user || (mHomeFocused
+            if (mPreforkUser != user || (mHomeFocusedUser == user
                     && uptime - mLastPreforkUptime >= AxMemoryPolicy.LMK_WINDOW_MS)) {
                 mLastPreforkUptime = uptime;
                 mPreforkUser = user;
                 for (int i = 0; i < preforks.size(); i++) {
                     final ApplicationInfo info = preforks.get(i);
-                    mAm.mHandler.postDelayed(() -> mAm.startAxPrefork(info),
-                            (i + 1) * PREFORK_STAGGER_MS);
+                    mAm.mHandler.postDelayed(() -> {
+                        if (mRanking == ranking) mAm.startAxPrefork(info);
+                    }, (i + 1) * PREFORK_STAGGER_MS);
                 }
             }
         }
@@ -228,6 +239,17 @@ final class AxMemoryManager {
         final long seq = app.getStartSeq();
         mAm.mHandler.postDelayed(() -> mAm.expireAxPrefork(app, seq),
                 AxMemoryPolicy.PREFORK_LIFETIME_MS);
+    }
+
+    boolean isEnabledForUser(int userId) {
+        return mEnabled && userId == mAm.mUserController.getCurrentUserId();
+    }
+
+    void clearInactivePreforks() {
+        for (int i = mPreforked.size() - 1; i >= 0; i--) {
+            final ProcessRecord app = mPreforked.valueAt(i);
+            if (!isEnabledForUser(app.userId)) clearPrefork(app);
+        }
     }
 
     void clearPrefork(ProcessRecord app) {
@@ -260,15 +282,15 @@ final class AxMemoryManager {
     }
 
     int adjustOom(ProcessRecord app, int adj) {
-        if (!mEnabled || app.isPersistent()) return adj;
+        if (!isEnabledForUser(app.userId) || app.isPersistent()) return adj;
+        if (app.mAxPrefork && (app.getHasShownUi() || app.getHasStartedServices())) {
+            clearPrefork(app);
+        }
         if ("fg-service".equals(app.getAdjType())) {
             return AxMemoryPolicy.foregroundServiceAdj(app.info.packageName, app.processName,
                     app.info.isSystemApp(), adj);
         }
         if (adj < AxMemoryPolicy.CACHED_MIN_ADJ) return adj;
-        if (app.mAxPrefork && (app.getHasShownUi() || app.getHasStartedServices())) {
-            clearPrefork(app);
-        }
         if (!app.getHasShownUi() && !app.mAxPrefork) return adj;
         final String pkg = app.info.packageName;
         if ("com.android.settings".equals(pkg)) return adj;
@@ -289,20 +311,21 @@ final class AxMemoryManager {
     }
 
     void onTopActivity(ApplicationInfo info, boolean home) {
-        mHomeFocused = home;
-        if (mEnabled && home) {
+        final int userId = UserHandle.getUserId(info.uid);
+        mHomeFocusedUser = home ? userId : NO_USER;
+        if (isEnabledForUser(userId) && home) {
             BackgroundThread.getHandler().post(() -> {
                 if (SystemClock.uptimeMillis() - mLastPreforkUptime >= AxMemoryPolicy.LMK_WINDOW_MS) {
                     scheduleRefresh(PREFORK_STAGGER_MS);
                 }
             });
         }
-        if (!mEnabled) return;
+        if (!isEnabledForUser(userId)) return;
         if (isCamera(info)) {
             final App top = new App(info.uid, info.packageName);
             if (!top.equals(mTopCamera)) {
                 mTopCamera = top;
-                mAm.mHandler.post(() -> releaseForEvent(Release.CAMERA, false));
+                postRelease(Release.CAMERA, false, userId);
             }
         } else {
             mTopCamera = null;
@@ -311,9 +334,11 @@ final class AxMemoryManager {
 
     boolean isCameraScene() {
         final App camera = mTopCamera;
-        return mEnabled && (SystemClock.uptimeMillis() < mCameraUntil
-                || (camera != null && UserHandle.getUserId(camera.uid)
-                        == mAm.mUserController.getCurrentUserId()));
+        final CameraStart start = mCameraStart;
+        final int userId = mAm.mUserController.getCurrentUserId();
+        return mEnabled && ((start != null && start.userId == userId
+                && SystemClock.uptimeMillis() < start.until)
+                || (camera != null && UserHandle.getUserId(camera.uid) == userId));
     }
 
     long cameraServiceRestartDelay() {
@@ -321,16 +346,19 @@ final class AxMemoryManager {
     }
 
     void onActivityProcessStart(ApplicationInfo info) {
-        if (!mEnabled) return;
+        final int userId = UserHandle.getUserId(info.uid);
+        if (!isEnabledForUser(userId)) return;
         if (isCamera(info)) {
-            mCameraUntil = SystemClock.uptimeMillis() + CAMERA_THROTTLE_MS;
-            mAm.mHandler.post(() -> releaseForEvent(Release.CAMERA, true));
+            mCameraStart = new CameraStart(userId, SystemClock.uptimeMillis() + CAMERA_THROTTLE_MS);
+            postRelease(Release.CAMERA, true, userId);
         }
         BackgroundThread.getHandler().post(() -> preloadCode(info));
     }
 
     private void preloadCode(ApplicationInfo info) {
-        if (!mEnabled || mAm.getMemoryTrimLevel() >= 2) return;
+        if (!isEnabledForUser(UserHandle.getUserId(info.uid)) || mAm.getMemoryTrimLevel() >= 2) {
+            return;
+        }
         // Bound speculative I/O and execute it off the AMS, WM and zygote threads.
         final byte[] buffer = new byte[64 * 1024];
         final int fileBudget = PRELOAD_BYTES / 2;
@@ -372,11 +400,21 @@ final class AxMemoryManager {
     }
 
     void onFaceAuthentication() {
-        if (mEnabled) mAm.mHandler.post(() -> releaseForEvent(Release.FACE, false));
+        postRelease(Release.FACE, false, mAm.mUserController.getCurrentUserId());
     }
 
-    private void releaseForEvent(Release release, boolean cold) {
-        if (!mEnabled || !mAm.mBooted) return;
+    private void postRelease(Release release, boolean cold, int userId) {
+        if (isEnabledForUser(userId)) {
+            mAm.mHandler.post(() -> releaseForEvent(release, cold, userId));
+        }
+    }
+
+    private void releaseForEvent(Release release, boolean cold, int userId) {
+        if (!isEnabledForUser(userId) || !mAm.mBooted) return;
+        if (mReleaseUser != userId) {
+            mReleaseUser = userId;
+            mLastCamera = mLastFace = mLastScreen = 0;
+        }
         final long now = SystemClock.uptimeMillis();
         final int maxCount;
         switch (release) {
@@ -397,42 +435,45 @@ final class AxMemoryManager {
             }
             default -> throw new IllegalArgumentException(release.name());
         }
-        release(release, AxMemoryPolicy.CACHED_MIN_ADJ, maxCount);
+        release(release, AxMemoryPolicy.CACHED_MIN_ADJ, maxCount, userId);
     }
 
     long releaseExplicit(int minAdj, int maxCount) {
-        if (!mEnabled) return 0;
+        final int userId = mAm.mUserController.getCurrentUserId();
+        if (!isEnabledForUser(userId)) return 0;
         long rssKb = release(Release.EXPLICIT, AxMemoryPolicy.releaseMinAdj(minAdj),
-                AxMemoryPolicy.releaseCount(maxCount));
-        mAm.getCachedAppOptimizer().compactAllSystem();
+                AxMemoryPolicy.releaseCount(maxCount), userId);
+        if (isEnabledForUser(userId)) mAm.getCachedAppOptimizer().compactAllSystem();
         return rssKb / 1024;
     }
 
-    private long release(Release release, int minAdj, int maxCount) {
-        return mAm.releaseAxMemory(minAdj, maxCount,
+    private long release(Release release, int minAdj, int maxCount, int userId) {
+        return mAm.releaseAxMemory(userId, minAdj, maxCount,
                 release == Release.CAMERA || release == Release.EXPLICIT,
                 release == Release.EXPLICIT, release.name());
     }
 
-    static boolean isReleaseCandidate(ProcessRecord app, ProcessRecord top, int minAdj,
-            boolean allowCachedActivities) {
+    static boolean isReleaseCandidate(ProcessRecord app, ProcessRecord top, int userId,
+            int minAdj, boolean allowCachedActivities) {
         final String pkg = app.info.packageName;
-        return app != top && app.getPid() > 0 && !app.isPersistent() && !app.isKilledByAm()
+        return app.userId == userId && app != top && app.getPid() > 0 && !app.isPersistent()
+                && !app.isKilledByAm()
                 && app.isProcessRunning() && !app.getServices().hasForegroundServices()
                 && !app.mReceivers.isReceivingBroadcast() && app.getSetAdj() >= minAdj
-                && app.getCurAdj() >= minAdj && (allowCachedActivities || !app.hasActivities())
+                && app.getCurAdj() >= minAdj && app.getLmkdAdj() >= minAdj
+                && (allowCachedActivities || !app.hasActivities())
                 && app.getSetProcState() > ActivityManager.PROCESS_STATE_RECEIVER
                 && app.getProcState() > ActivityManager.PROCESS_STATE_RECEIVER
                 && !PROTECTED_PACKAGES.contains(pkg)
                 && !"com.google.android.googlequicksearchbox:search".equals(app.processName);
     }
 
-    static List<ProcessRecord> rankVictims(List<ProcessRecord> lru, ProcessRecord top, int minAdj,
-            boolean allowCachedActivities, boolean rankByRss) {
+    static List<ProcessRecord> rankVictims(List<ProcessRecord> lru, ProcessRecord top, int userId,
+            int minAdj, boolean allowCachedActivities, boolean rankByRss) {
         final ArrayList<Candidate> candidates = new ArrayList<>();
         for (ProcessRecord app : lru) {
-            if (isReleaseCandidate(app, top, minAdj, allowCachedActivities)) {
-                candidates.add(new Candidate(app, app.getSetAdj(), app.getLastRss()));
+            if (isReleaseCandidate(app, top, userId, minAdj, allowCachedActivities)) {
+                candidates.add(new Candidate(app, app.getLmkdAdj(), app.getLastRss()));
             }
         }
         candidates.sort(Comparator.comparingInt(Candidate::adj));

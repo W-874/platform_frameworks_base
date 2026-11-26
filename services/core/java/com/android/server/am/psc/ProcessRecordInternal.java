@@ -136,7 +136,7 @@ public abstract class ProcessRecordInternal {
     /** Retrieves the last reported RSS (Resident Set Size) for this process. */
     public abstract long getLastRss();
 
-    /** Applies platform memory retention policy to the final OOM score. */
+    /** Applies platform memory retention policy to the score sent to LMKD only. */
     public int applyMemoryPolicyAdj(int adj) {
         return adj;
     }
@@ -445,6 +445,9 @@ public abstract class ProcessRecordInternal {
      */
     @CompositeRWLock({"mServiceLock", "mProcLock"})
     private @OomAdjust int mSetAdj = INVALID_ADJ;
+
+    @CompositeRWLock({"mServiceLock", "mProcLock"})
+    private @OomAdjust int mSetLmkdAdj = INVALID_ADJ;
 
     /**
      * The previously set raw OOM adjustment for this process.
@@ -958,6 +961,17 @@ public abstract class ProcessRecordInternal {
     @GuardedBy({"mServiceLock", "mProcLock"})
     void setSetAdj(@OomAdjust int setAdj) {
         mSetAdj = setAdj;
+    }
+
+    @GuardedBy({"mServiceLock", "mProcLock"})
+    void setLmkdAdj(@OomAdjust int adj) {
+        mSetLmkdAdj = adj;
+    }
+
+    /** Last OOM score published through LMKD, including memory retention policy. */
+    @GuardedBy(anyOf = {"mServiceLock", "mProcLock"})
+    public @OomAdjust int getLmkdAdj() {
+        return mSetLmkdAdj;
     }
 
     /**
@@ -1605,6 +1619,7 @@ public abstract class ProcessRecordInternal {
         mForcingToImportant = null;
         mPrevSetRawAdj = mSetRawAdj;
         mCurRawAdj = mSetRawAdj = mCurAdj = mSetAdj = INVALID_ADJ;
+        mSetLmkdAdj = INVALID_ADJ;
         mCurCapability = mSetCapability = PROCESS_CAPABILITY_NONE;
         mCurSchedGroup = mSetSchedGroup = SCHED_GROUP_BACKGROUND;
         mCurProcState = mCurRawProcState = mSetProcState = PROCESS_STATE_NONEXISTENT;
@@ -1771,7 +1786,8 @@ public abstract class ProcessRecordInternal {
         pw.print(" curRaw="); pw.print(mCurRawAdj);
         pw.print(" setRaw="); pw.print(mSetRawAdj);
         pw.print(" cur="); pw.print(mCurAdj);
-        pw.print(" set="); pw.println(mSetAdj);
+        pw.print(" set="); pw.print(mSetAdj);
+        pw.print(" lmkd="); pw.println(mSetLmkdAdj);
         pw.print(prefix); pw.print("mCurSchedGroup="); pw.print(mCurSchedGroup);
         pw.print(" setSchedGroup="); pw.print(mSetSchedGroup);
         pw.print(" systemNoUi="); pw.println(mSystemNoUi);

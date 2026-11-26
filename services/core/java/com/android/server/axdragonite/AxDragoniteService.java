@@ -4,6 +4,7 @@
  */
 package com.android.server.axdragonite;
 
+import android.content.ContentResolver;
 import android.content.Context;
 import android.database.ContentObserver;
 import android.os.Handler;
@@ -22,6 +23,7 @@ import android.util.SparseIntArray;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /** SystemServer scene coordinator, adapted from Axion's Dragonite session records. */
 public final class AxDragoniteService {
@@ -29,6 +31,12 @@ public final class AxDragoniteService {
     private static final String ENABLED = "ax_dragonite_enabled";
     private static final String AFFINITY = "ax_dragonite_affinity";
     private static final String REALTIME = "ax_dragonite_realtime";
+    private static final String THREAD_POLICY = "ax_dragonite_thread_policy";
+    private static final String MEMORY_PROFILE = "ax_dragonite_memory_profile";
+    private static final String[] SETTINGS = {ENABLED, AFFINITY, REALTIME, THREAD_POLICY,
+            AxKernelManager.GOVERNOR, AxKernelManager.CPU_PROFILE, AxKernelManager.GPU_PROFILE,
+            MEMORY_PROFILE};
+    private static final long HAL_RECONNECT_MS = 5_000;
     private static volatile AxDragoniteService sService;
 
     // Client pulses from one process share a Binder identity. In-process callers use a distinct
@@ -67,13 +75,22 @@ public final class AxDragoniteService {
     private final SparseIntArray mUiPids = new SparseIntArray();
     private final SparseArray<AxUiPlacement> mPlacements = new SparseArray<>();
     private final Runnable mExpire = this::reconcile;
+    private final Consumer<IBinder> mOnHalDied = this::onHalDied;
     private AxKernelManager mKernel;
     private boolean mEnabled;
     private boolean mAffinity;
     private boolean mRealtime;
+    private boolean mFairBoost;
+    private volatile boolean mRetainCachedActivities;
 
     public static boolean isConfigured() {
         return AxKernelManager.isConfigured();
+    }
+
+    /** Retain warm activities by restricting freezer-triggered compaction to empty processes. */
+    public static boolean retainCachedActivities() {
+        AxDragoniteService service = sService;
+        return service != null && service.mRetainCachedActivities;
     }
 
     public static void start(Context context) {
@@ -98,20 +115,32 @@ public final class AxDragoniteService {
                     updateSettings();
                 }
             };
-            context.getContentResolver().registerContentObserver(
-                    Settings.Global.getUriFor(ENABLED), false, observer);
-            context.getContentResolver().registerContentObserver(
-                    Settings.Global.getUriFor(AFFINITY), false, observer);
-            context.getContentResolver().registerContentObserver(
-                    Settings.Global.getUriFor(REALTIME), false, observer);
+            ContentResolver resolver = context.getContentResolver();
+            for (String setting : SETTINGS) {
+                resolver.registerContentObserver(Settings.Global.getUriFor(setting), false, observer);
+            }
             updateSettings();
         });
     }
 
+    private void onHalDied(IBinder binder) {
+        mWorker.post(() -> {
+            mKernel.onHalDied(binder);
+            reconcile();
+        });
+    }
+
     private void updateSettings() {
-        mEnabled = Settings.Global.getInt(mContext.getContentResolver(), ENABLED, 1) != 0;
-        mAffinity = Settings.Global.getInt(mContext.getContentResolver(), AFFINITY, 1) != 0;
-        mRealtime = Settings.Global.getInt(mContext.getContentResolver(), REALTIME, 0) != 0;
+        ContentResolver resolver = mContext.getContentResolver();
+        mEnabled = Settings.Global.getInt(resolver, ENABLED, 1) != 0;
+        mAffinity = Settings.Global.getInt(resolver, AFFINITY, 1) != 0;
+        mRealtime = Settings.Global.getInt(resolver, REALTIME, 0) != 0;
+        mFairBoost = "fair".equals(Settings.Global.getString(resolver, THREAD_POLICY));
+        mRetainCachedActivities = mEnabled
+                && "retain-activities".equals(Settings.Global.getString(resolver, MEMORY_PROFILE));
+        mKernel.setProfiles(Settings.Global.getString(resolver, AxKernelManager.GOVERNOR),
+                Settings.Global.getString(resolver, AxKernelManager.CPU_PROFILE),
+                Settings.Global.getString(resolver, AxKernelManager.GPU_PROFILE), mEnabled);
         if (!mEnabled) {
             for (int i = mLeases.size() - 1; i >= 0; i--) removeLeaseAt(i);
         }
@@ -212,13 +241,22 @@ public final class AxDragoniteService {
                 mPlacements.put(pid, placement);
             }
             placement.refresh();
-            if (mRealtime && mUiPids.valueAt(i) == AxKernelManager.HEAVY) {
+            boolean heavy = mUiPids.valueAt(i) == AxKernelManager.HEAVY;
+            if (heavy && mRealtime && !mFairBoost) {
+                placement.stopFairBoost();
                 nextExpiry = Math.min(nextExpiry, placement.reconcileRealtime(now));
             } else {
                 placement.stopRealtime();
+                if (heavy && mFairBoost) {
+                    placement.boostFairPriority();
+                } else {
+                    placement.stopFairBoost();
+                }
             }
         }
-        mKernel.apply(level, until, gpuUntil);
+        if (!mKernel.apply(level, until, gpuUntil, mOnHalDied)) {
+            nextExpiry = Math.min(nextExpiry, now + HAL_RECONNECT_MS);
+        }
         Trace.traceCounter(Trace.TRACE_TAG_POWER, "AxDragonite level", level);
         Trace.traceCounter(Trace.TRACE_TAG_POWER, "AxDragonite leases", mLeases.size());
         mWorker.removeCallbacks(mExpire);

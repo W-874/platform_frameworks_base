@@ -21,6 +21,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.function.Consumer;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -34,6 +35,16 @@ final class AxKernelManager {
     private static final String HAL_SERVICE = "android.hardware.power.IPower/default";
     private static final String[] CPU_HINTS = {null, "AX_DRAGONITE_LIGHT", "AX_DRAGONITE_HEAVY"};
     private static final String GPU_RENDERING_HINT = "AX_DRAGONITE_GPU_RENDERING";
+    static final String GOVERNOR = "ax_dragonite_cpu_governor";
+    static final String CPU_PROFILE = "ax_dragonite_cpu_profile";
+    static final String GPU_PROFILE = "ax_dragonite_gpu_profile";
+    private static final String CPU_PERFORMANCE = "AX_DRAGONITE_CPU_PERFORMANCE";
+    private static final String GPU_PERFORMANCE = "AX_DRAGONITE_GPU_PERFORMANCE";
+    private static final String GOVERNOR_PERFORMANCE = "AX_DRAGONITE_GOVERNOR_PERFORMANCE";
+    private static final String GOVERNOR_POWERSAVE = "AX_DRAGONITE_GOVERNOR_POWERSAVE";
+    private static final String[] MODES = {
+        CPU_PERFORMANCE, GPU_PERFORMANCE, GOVERNOR_PERFORMANCE, GOVERNOR_POWERSAVE
+    };
 
     private static final class ProductPolicy {
         static final File FILE = new File(Environment.getProductDirectory(), "etc/ax_dragonite.xml");
@@ -45,9 +56,34 @@ final class AxKernelManager {
     private final AxPowerVote mCpuVote = new AxPowerVote(SystemClock::uptimeMillis);
     private final AxPowerVote mGpuVote = new AxPowerVote(SystemClock::uptimeMillis);
     final long performanceMask;
-    private AxPowerVote.Boost mBoost;
     private boolean mHasRenderingScenes;
     private boolean mRenderingSupported;
+    private IPowerExt mHal;
+    private AxPowerVote.Boost mBoost;
+    private IBinder.DeathRecipient mDeathRecipient;
+    private int mSupportedModes;
+    private int mActiveModes;
+    private int mRequestedModes;
+
+    void setProfiles(String governor, String cpu, String gpu, boolean enabled) {
+        mRequestedModes = 0;
+        if (!enabled) return;
+        if ("performance".equals(cpu)) mRequestedModes |= 1;
+        if ("performance".equals(gpu)) mRequestedModes |= 1 << 1;
+        if ("performance".equals(governor)) mRequestedModes |= 1 << 2;
+        if ("powersave".equals(governor)) mRequestedModes |= 1 << 3;
+    }
+
+    void onHalDied(IBinder binder) {
+        if (mHal != null && mHal.asBinder() == binder) disconnect();
+    }
+
+    private void disconnect() {
+        if (mHal != null) mHal.asBinder().unlinkToDeath(mDeathRecipient, 0);
+        mHal = null;
+        mBoost = null;
+        mRenderingSupported = false;
+    }
 
     static boolean isConfigured() {
         return ProductPolicy.FILE.isFile();
@@ -105,34 +141,68 @@ final class AxKernelManager {
     }
 
     // Called on the Dragonite worker only. libperfmgr remains the sole shared node writer.
-    void apply(int level, long until, long gpuUntil) {
-        if (level == NONE && gpuUntil == 0 && mCpuVote.hint() == null && mGpuVote.hint() == null) {
-            return;
-        }
+    boolean apply(int level, long until, long gpuUntil,
+            Consumer<IBinder> onHalDied) {
         try {
-            boolean reconnect = mBoost == null;
+            boolean reconnect = mHal == null;
             if (reconnect) {
                 IBinder binder = ServiceManager.checkService(HAL_SERVICE);
-                if (binder == null) return;
+                if (binder == null) return false;
                 IPowerExt hal = IPowerExt.Stub.asInterface(binder.getExtension());
-                if (hal == null) return;
-                mRenderingSupported = mHasRenderingScenes && hal.isBoostSupported(GPU_RENDERING_HINT);
+                if (hal == null) return false;
+                int supported = 0;
+                for (int i = 0; i < MODES.length; i++) {
+                    if (hal.isModeSupported(MODES[i])) supported |= 1 << i;
+                }
+                boolean rendering = mHasRenderingScenes && hal.isBoostSupported(GPU_RENDERING_HINT);
+                IBinder extension = hal.asBinder();
+                IBinder.DeathRecipient recipient = () -> onHalDied.accept(extension);
+                extension.linkToDeath(recipient, 0);
+                mHal = hal;
                 mBoost = hal::setBoost;
+                mDeathRecipient = recipient;
+                mSupportedModes = supported;
+                mRenderingSupported = rendering;
             }
+            final int requested = mRequestedModes & mSupportedModes;
+            final int previous = reconnect ? mSupportedModes & ~requested : mActiveModes;
+            // Enable replacements first so governor changes need not visit schedutil in between.
+            for (int i = 0; i < MODES.length; i++) {
+                final int bit = 1 << i;
+                if ((requested & bit) != 0 && (reconnect || (previous & bit) == 0)) {
+                    mHal.setMode(MODES[i], true);
+                }
+            }
+            for (int i = 0; i < MODES.length; i++) {
+                final int bit = 1 << i;
+                if ((previous & bit) != 0 && (requested & bit) == 0) {
+                    mHal.setMode(MODES[i], false);
+                }
+            }
+            mActiveModes = requested;
             mCpuVote.apply(mBoost, CPU_HINTS[level], until, reconnect);
-            mGpuVote.apply(mBoost, mRenderingSupported && gpuUntil != 0 ? GPU_RENDERING_HINT : null,
+            mGpuVote.apply(mBoost,
+                    mRenderingSupported && gpuUntil != 0 ? GPU_RENDERING_HINT : null,
                     gpuUntil, reconnect);
+            return true;
         } catch (RemoteException e) {
-            mBoost = null;
             Slog.w(TAG, "Power HAL extension unavailable", e);
+            disconnect();
+            return false;
         }
     }
 
     void dump(PrintWriter pw) {
         pw.println("  performanceMask=0x" + Long.toHexString(performanceMask));
         pw.println("  hint=" + mCpuVote.hint() + " expiresUptime=" + mCpuVote.until()
-                + " halConnected=" + (mBoost != null));
+                + " halConnected=" + (mHal != null));
         pw.println("  gpuHint=" + mGpuVote.hint() + " expiresUptime=" + mGpuVote.until()
                 + " renderingSupported=" + mRenderingSupported);
+        for (int i = 0; i < MODES.length; i++) {
+            int bit = 1 << i;
+            pw.println("  " + MODES[i] + " requested=" + ((mRequestedModes & bit) != 0)
+                    + " supported=" + ((mSupportedModes & bit) != 0)
+                    + " active=" + (mHal != null && (mActiveModes & bit) != 0));
+        }
     }
 }

@@ -115,6 +115,7 @@ import com.android.server.am.compaction.CompactionStatsManager;
 import com.android.server.am.compaction.SingleCompactionStats;
 import com.android.server.am.psc.Constants.OomAdjust;
 import com.android.server.am.psc.OomAdjuster;
+import com.android.server.axdragonite.AxDragoniteService;
 
 import dalvik.annotation.optimization.NeverCompile;
 
@@ -1817,8 +1818,12 @@ public class CachedAppOptimizer {
     void onProcessFrozen(ProcessRecord frozenProc) {
         if (useCompaction()) {
             synchronized (mProcLock) {
-                // only full-compact if process is cached
-                if (frozenProc.getSetAdj() >= mCompactThrottleMinOomAdj) {
+                // Dragonite may retain warm activities; all eligible compaction still goes
+                // through the stock queue, RSS/swap throttles and OOM-improvement cancellation.
+                if (frozenProc.getSetAdj() >= mCompactThrottleMinOomAdj
+                        && (!AxDragoniteService.retainCachedActivities()
+                                || frozenProc.getSetProcState()
+                                    == ActivityManager.PROCESS_STATE_CACHED_EMPTY)) {
                     compactApp(frozenProc, CompactProfile.FULL, CompactSource.APP, false);
                 }
             }

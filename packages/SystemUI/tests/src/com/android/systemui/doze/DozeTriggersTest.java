@@ -563,12 +563,12 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE);
         when(mConfig.enabled(anyInt())).thenReturn(true);
         when(mConfig.pickupGestureEnabled(anyInt())).thenReturn(true);
-        when(mConfig.pickupGestureAmbient(anyInt())).thenReturn(true);
+        when(mConfig.pickupGestureAmbient(0)).thenReturn(true);
         mTriggers.onPickupConfirmed();
         verify(mMachine).requestPulse(DozeLog.REASON_SENSOR_PICKUP);
         verify(mMachine, never()).wakeUp(anyInt());
 
-        when(mConfig.pickupGestureAmbient(anyInt())).thenReturn(false);
+        when(mConfig.pickupGestureAmbient(0)).thenReturn(false);
         mTriggers.onPickupConfirmed();
         verify(mMachine).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
     }
@@ -582,6 +582,22 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mConfig.pickupGestureEnabled(anyInt())).thenReturn(true);
         when(mMachine.getState()).thenReturn(DozeMachine.State.FINISH);
         mTriggers.onPickupConfirmed();
+        verify(mMachine, never()).wakeUp(anyInt());
+        verify(mMachine, never()).requestPulse(anyInt());
+    }
+
+    @Test
+    public void pendingPickupCannotCrossUserSwitchBeforeCallback() {
+        when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE);
+        when(mConfig.enabled(anyInt())).thenReturn(true);
+        when(mConfig.pickupGestureEnabled(anyInt())).thenReturn(true);
+
+        when(mUserTracker.getUserId()).thenReturn(10);
+        mTriggers.onPickupConfirmed();
+
+        when(mSelectedUserInteractor.getSelectedUserId()).thenReturn(10);
+        mTriggers.onPickupConfirmed();
+
         verify(mMachine, never()).wakeUp(anyInt());
         verify(mMachine, never()).requestPulse(anyInt());
     }

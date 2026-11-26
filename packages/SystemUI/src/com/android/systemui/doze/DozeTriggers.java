@@ -102,6 +102,7 @@ public class DozeTriggers implements DozeMachine.Part {
     private final AsyncSensorManager mSensorManager;
     private final WakeLock mWakeLock;
     @Nullable private final DozePickupTiltCheck mPickupTiltCheck;
+    private int mPickupUserId;
     private final boolean mAllowPulseTriggers;
     private final TriggerReceiver mBroadcastReceiver = new TriggerReceiver();
     private final DockEventListener mDockEventListener = new DockEventListener();
@@ -127,7 +128,10 @@ public class DozeTriggers implements DozeMachine.Part {
             new UserTracker.Callback() {
                 @Override
                 public void onUserChanged(int newUser, @NonNull Context userContext) {
-                    if (mPickupTiltCheck != null) mPickupTiltCheck.setListening(false);
+                    if (mPickupTiltCheck != null) {
+                        mPickupTiltCheck.setListening(false);
+                        mPickupUserId = newUser;
+                    }
                     mDozeSensors.onUserSwitched();
                 }
             };
@@ -250,6 +254,7 @@ public class DozeTriggers implements DozeMachine.Part {
         mUiEventLogger = uiEventLogger;
         mKeyguardStateController = keyguardStateController;
         mUserTracker = userTracker;
+        mPickupUserId = userTracker.getUserId();
         mSelectedUserInteractor = selectedUserInteractor;
     }
 
@@ -398,11 +403,13 @@ public class DozeTriggers implements DozeMachine.Part {
     @VisibleForTesting
     void onPickupConfirmed() {
         int user = mSelectedUserInteractor.getSelectedUserId();
-        if (!mMachine.isExecutingTransition() && canPulse(mMachine.getState(), true)
+        // The tracker changes before the main-thread user callback resets sensor history.
+        if (user == mPickupUserId && user == mUserTracker.getUserId()
+                && !mMachine.isExecutingTransition() && canPulse(mMachine.getState(), true)
                 && !shouldDropPickupEvent() && !mDozeHost.isPulsingBlocked()
                 && mConfig.enabled(user) && mConfig.pickupGestureEnabled(user)
                 && !Boolean.TRUE.equals(mDozeSensors.isProximityCurrentlyNear())) {
-            gentleWakeUp(DozeLog.REASON_SENSOR_PICKUP);
+            gentleWakeUp(DozeLog.REASON_SENSOR_PICKUP, user);
         }
     }
 
@@ -410,18 +417,22 @@ public class DozeTriggers implements DozeMachine.Part {
         return mKeyguardStateController.isOccluded();
     }
 
-    private boolean dozeInsteadOfWake(@DozeLog.Reason int reason) {
+    private boolean dozeInsteadOfWake(@DozeLog.Reason int reason, int userId) {
         switch (reason) {
             case DozeLog.REASON_SENSOR_PICKUP:
-                return mConfig.pickupGestureAmbient(UserHandle.USER_CURRENT);
+                return mConfig.pickupGestureAmbient(userId);
             case DozeLog.REASON_SENSOR_TAP:
-                return mConfig.tapGestureAmbient(UserHandle.USER_CURRENT);
+                return mConfig.tapGestureAmbient(userId);
         }
         return false;
     }
 
     private void gentleWakeUp(@DozeLog.Reason int reason) {
-        if (dozeInsteadOfWake(reason)) {
+        gentleWakeUp(reason, UserHandle.USER_CURRENT);
+    }
+
+    private void gentleWakeUp(@DozeLog.Reason int reason, int userId) {
+        if (dozeInsteadOfWake(reason, userId)) {
             requestPulse(reason, true, null);
             return;
         }
@@ -570,6 +581,9 @@ public class DozeTriggers implements DozeMachine.Part {
     }
 
     private void registerCallbacks() {
+        if (mPickupTiltCheck != null) {
+            mPickupUserId = mUserTracker.getUserId();
+        }
         mBroadcastReceiver.register(mBroadcastDispatcher);
         mDockManager.addListener(mDockEventListener);
         mDozeHost.addCallback(mHostCallback);

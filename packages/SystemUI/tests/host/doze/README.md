@@ -16,15 +16,17 @@ javac -d "$classes" "$src"/DozePickup{Motion,MotionFeatures,StateMachine}.java \
 The traces are synthetic. They exercise static poses, impacts, periodic gait, four
 positive paths, FIFO reordering, shifted hint times and gesture epoch reuse. They
 do not measure a handset's accuracy, suspend retention, power, or display latency.
-`DozeTriggersTest` separately checks full wake vs ambient pulse and late opt-out.
+`DozeTriggersTest` separately checks full wake vs ambient pulse, late opt-out,
+and suppression while a user switch invalidates the pending pickup.
 
 Only devices opting into `doze_pickup_motion_history` use this path. Sagit still
 requires the user's pickup setting. A QTI one-shot is a request to inspect IMU
 evidence: its scalar is not read and its timestamp is not a motion landmark. A
 non-wake accelerometer requests a batched stream while eligible. History and live
 streams are merged by sample time. Recognition stops at most 250 ms after receipt
-(late callbacks must not dispatch). A positive path still needs observed FAR and
-the usual Doze/user policy. Missing prehistory can arm an additional significant-
+(late callbacks must not dispatch). A failed live registration does not discard
+usable batched history. A positive path still needs observed FAR and the usual
+Doze/user policy. Missing prehistory can arm an additional significant-
 motion hint; neither that hint nor a proximity transition is sufficient to wake.
 QTI is not throttled without an independently validated replacement. In particular,
 screen-off success does not imply the QTI hardware stopped waking the AP.

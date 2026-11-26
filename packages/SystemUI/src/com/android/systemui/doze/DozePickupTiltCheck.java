@@ -97,6 +97,9 @@ final class DozePickupTiltCheck {
             if (mProximity == null && mDefaultProximity != mNonWakeProximity) {
                 mProximity = registerProximity(mDefaultProximity);
             }
+            if (mProximity == null) {
+                return;
+            }
             mHistory.start(nowNs);
             setFallback(!mHistory.isRegistered());
             return;
@@ -128,7 +131,7 @@ final class DozePickupTiltCheck {
 
     private boolean begin(long eventNs, long receivedNs) {
         Sensor accelerometer = mHistory.accelerometer();
-        if (accelerometer == null || !mState.begin(eventNs, receivedNs,
+        if (accelerometer == null || mProximity == null || !mState.begin(eventNs, receivedNs,
                 mClock.elapsedRealtimeNanos())) {
             return false;
         }
@@ -157,7 +160,10 @@ final class DozePickupTiltCheck {
                     LIVE_PERIOD_US);
             if (!window.mLiveRegistered) {
                 mLiveRegistrationFailures++;
-                return true;
+                if (!mHistory.isRegistered()) {
+                    return true;
+                }
+                // The queued flush can still provide enough evidence without live samples.
             }
             started = true;
         } finally {

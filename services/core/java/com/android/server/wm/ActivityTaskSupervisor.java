@@ -1930,6 +1930,9 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
             Slog.w(TAG, "No component for base intent of task: " + task);
             return;
         }
+        if (removeFromRecents) {
+            mService.mAmInternal.onAxTaskRemoved(task.effectiveUid, component.getPackageName());
+        }
 
         // Find any running services associated with this app and stop if needed.
         final Message msg = PooledLambda.obtainMessage(ActivityManagerInternal::cleanUpServices,

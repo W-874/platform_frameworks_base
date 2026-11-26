@@ -1319,6 +1319,13 @@ class ProcessRecord extends ProcessRecordInternal implements WindowProcessListen
         return mServices.hasForegroundServices();
     }
 
+    boolean mAxPrefork;
+
+    @Override
+    public int applyMemoryPolicyAdj(int adj) {
+        return mService.mAxMemory.adjustOom(this, adj);
+    }
+
     /**
      * Let an app process throw an exception on a binder thread, which typically crashes the
      * process, unless it has an unhandled exception handler.

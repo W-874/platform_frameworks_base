@@ -5963,6 +5963,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
 
         updateResumedAppTrace(r);
         mLastResumedActivity = r;
+        mAmInternal.onAxTopActivity(r.info.applicationInfo, r.isActivityTypeHome());
 
         // Don't take focus when transient launching. We don't want the app to know anything
         // until we've committed to the gesture. The focus will be transferred at the end of

@@ -6044,10 +6044,11 @@ public final class ActiveServices {
     @GuardedBy("mAm")
     long getExtraRestartTimeInBetweenLocked() {
         if (!mAm.mConstants.mEnableExtraServiceRestartDelayOnMemPressure) {
-            return 0;
+            return mAm.mAxMemory.cameraServiceRestartDelay();
         }
         final @MemFactor int memFactor = mAm.mAppProfiler.getLastMemoryLevelLocked();
-        return mAm.mConstants.mExtraServiceRestartDelayOnMemPressure[memFactor];
+        return Math.max(mAm.mConstants.mExtraServiceRestartDelayOnMemPressure[memFactor],
+                mAm.mAxMemory.cameraServiceRestartDelay());
     }
 
     final void performServiceRestartLocked(ServiceRecord r) {

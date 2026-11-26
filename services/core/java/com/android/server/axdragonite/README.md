@@ -71,12 +71,25 @@ only the existing libperfmgr HAL writes these masks at runtime.
   Axion Routines consumer and retains the existing SystemUI tiles/controllers
   and permission checks. Do not introduce an exported package-prefix-based
   privilege bridge for Wi-Fi, Bluetooth, privacy, media or screen actions.
-- `ax_memory_server` adds policy at AMS process launch/death and in
-  `OomAdjuster`, including prefork, foreground-service/cached-app adjustment,
-  camera/face-auth release and an explicit memory-release Binder call. These
-  compete with AOSP AMS, LMKD, the freezer/compactor (`CachedAppOptimizer`)
-  and mmd. They are not ported; no parallel pressure-trigger loop or app-kill
-  policy is enabled. The read-only pressure diagnostic is independent of them.
+- Axion memory policy lives in AMS, not a separate daemon. Android's per-user
+  usage and LMKD exit history select five frequently used apps for retention and
+  staggered, pressure/PSS-bounded empty process warmup. Launch reads are bounded;
+  process death and task removal invalidate speculative state. OomAdjuster sets
+  final foreground-service and cached scores through the existing LMKD channel.
+- Camera start, keyguard face authentication and screen-on use one AMS reclaim
+  path, which excludes active and protected processes and records exits in AMS.
+  Camera starts share a cooldown; service restarts keep Android's pressure
+  backoff with additional camera-scene spacing. `cmd activity release-memory [MIN_ADJ [MAX_COUNT]]` invokes the
+  same path with adj/RSS ranking and requests CachedAppOptimizer system
+  compaction. Its number is estimated victim RSS, not measured free RAM. The
+  shell entry requires `KILL_ALL_BACKGROUND_PROCESSES`. The global
+  `ax_memory_policy_enabled` setting defaults to enabled and is writable only
+  through the existing privileged Settings provider path. No Settings screen
+  or unprivileged Binder API was added.
+- LMKD/mmd still own system pressure and zram decisions. This port does not add
+  Axion-private LMKD opcodes, raw swappiness/free-page writes, process-wide page
+  repopulation, or a forced SystemUI restart during sleep. The stock freezer,
+  writeback, and SystemUI lifecycle retain their own policies.
 - `ax_dexopt_server`'s in-call guard is registered by `DexOptHelper` as an
   ART batch start callback (`ax_dexopt_guard_enabled`, default on for the
   configured product). Its compensation policy is part of the existing

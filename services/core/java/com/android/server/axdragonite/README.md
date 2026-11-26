@@ -47,6 +47,9 @@ report. Only an authenticated loading edge from the admitted game process
 can vote the separate 640 ms Dragonite loading hint. The session itself
 never requests CPU/GPU floors; Android's ordinary GameManager modes and
 UWU's UI remain in place.
+Loading duration is measured from the incoming Binder report, not from when
+the scene worker receives it. Short UI leases retry thread discovery while
+active so a newly started or replaced RenderThread can participate.
 
 The same arbiter sends held, bounded top-app votes for shade and unlock
 (`0-3`, restoring `0-7`) and background votes for launch and system fling
@@ -72,20 +75,24 @@ only the existing libperfmgr HAL writes these masks at runtime.
   and permission checks. Do not introduce an exported package-prefix-based
   privilege bridge for Wi-Fi, Bluetooth, privacy, media or screen actions.
 - Axion memory policy lives in AMS, not a separate daemon. Android's per-user
-  usage and LMKD exit history select five frequently used apps for retention and
+  usage and LMKD exit history select frequently used apps for retention and
   staggered, pressure/PSS-bounded empty process warmup. Launch reads are bounded;
-  process death and task removal invalidate speculative state. OomAdjuster sets
-  final foreground-service and cached scores through the existing LMKD channel.
+  process death and task removal invalidate speculative state. Retention scores
+  are sent through Android's existing LMKD channel without changing the OOM
+  state used by AMS, the cached-app freezer, or compaction.
 - Camera start, keyguard face authentication and screen-on use one AMS reclaim
-  path, which excludes active and protected processes and records exits in AMS.
-  Camera starts share a cooldown; service restarts keep Android's pressure
-  backoff with additional camera-scene spacing. `cmd activity release-memory [MIN_ADJ [MAX_COUNT]]` invokes the
-  same path with adj/RSS ranking and requests CachedAppOptimizer system
-  compaction. Its number is estimated victim RSS, not measured free RAM. The
-  shell entry requires `KILL_ALL_BACKGROUND_PROCESSES`. The global
-  `ax_memory_policy_enabled` setting defaults to enabled and is writable only
-  through the existing privileged Settings provider path. No Settings screen
-  or unprivileged Binder API was added.
+  path. Work queued for another user is dropped, and the MiPush broker is not
+  selected as a proactive victim. This is not a freezer exemption. Camera starts
+  share a cooldown; service restarts keep Android's pressure backoff with
+  additional camera-scene spacing. `cmd activity release-memory [MIN_ADJ [MAX_COUNT]]`
+  invokes the same path with adj/RSS ranking and requests CachedAppOptimizer
+  system compaction. Its number is estimated victim RSS, not measured free RAM.
+  The shell entry requires `KILL_ALL_BACKGROUND_PROCESSES`.
+- The privileged Global `ax_memory_policy_enabled` setting overrides the product
+  default (on for Sagit, off otherwise). Use `adb shell settings put global
+  ax_memory_policy_enabled 0` to disable it and `adb shell settings delete global
+  ax_memory_policy_enabled` to restore the default. No Settings screen or
+  unprivileged Binder API was added.
 - LMKD/mmd still own system pressure and zram decisions. This port does not add
   Axion-private LMKD opcodes, raw swappiness/free-page writes, process-wide page
   repopulation, or a forced SystemUI restart during sleep. The stock freezer,

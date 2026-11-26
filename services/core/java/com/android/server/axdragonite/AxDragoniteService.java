@@ -96,28 +96,31 @@ public final class AxDragoniteService {
     }
 
     /** Binder caller identity sampled before GameManagerService hands the request to its handler. */
-    public record GameCaller(int pid, int uid, long startTime) {}
+    public record GameCaller(int pid, int uid, long startTime, long requestedAt) {}
 
     public static GameCaller captureGameCaller() {
         if (sService == null) return null;
+        long requestedAt = SystemClock.uptimeMillis();
         int pid = Binder.getCallingPid();
         if (pid <= 0 || pid == Process.myPid()) return null;
         long startTime = AxUiPlacement.startTime(pid, pid);
-        return startTime < 0 ? null : new GameCaller(pid, Binder.getCallingUid(), startTime);
+        return startTime < 0 ? null : new GameCaller(pid, Binder.getCallingUid(), startTime,
+                requestedAt);
     }
 
     public static void requestGameLoading(String packageName, int packageUid, GameCaller caller,
             boolean active) {
         AxDragoniteService service = sService;
         if (service == null || caller == null || caller.uid() != packageUid) return;
-        long requested = SystemClock.uptimeMillis();
         service.mWorker.post(() -> {
             if (!service.mEnabled) return;
             AxKernelManager.Scene scene = service.mKernel.scenes.get(AxDragonite.GAME_LOADING);
             if (scene == null) return;
+            long until = caller.requestedAt() + scene.durationMs();
+            if (active && until <= SystemClock.uptimeMillis()) return;
             service.updateGameSession();
             service.mGame.loading(packageName, caller.uid(), caller.pid(), caller.startTime(),
-                    active, requested + scene.durationMs());
+                    active, until);
             service.reconcile();
         });
     }
@@ -304,6 +307,9 @@ public final class AxDragoniteService {
             mObservedTop = top;
             mObservedStartTime = start;
             mGame.clear();
+        } else if (mObservedStartTime < 0) {
+            // A failed proc read on the first notification is not a process generation.
+            mObservedStartTime = start;
         }
         if (start < 0 || start != mObservedStartTime || !top.process().isBinderAlive()
                 || Process.getUidForPid(top.pid()) != top.uid()) {
@@ -422,7 +428,7 @@ public final class AxDragoniteService {
                 placement = new AxUiPlacement(pid, mKernel.performanceMask);
                 mPlacements.put(pid, placement);
             }
-            placement.refresh();
+            nextExpiry = Math.min(nextExpiry, placement.refresh(now));
             boolean heavy = mUiPids.valueAt(i) == AxKernelManager.HEAVY;
             if (heavy && mRealtime && !mFairBoost) {
                 placement.stopFairBoost();

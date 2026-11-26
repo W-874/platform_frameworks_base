@@ -18,6 +18,7 @@ import java.util.Arrays;
 final class AxUiPlacement {
     private static final String TAG = "AxDragonitePlacement";
     private static final int DISCOVERY_INTERVAL_MS = 200;
+    static final int GAME_DISCOVERY_INTERVAL_MS = 1_000;
 
     private record Placement(int tid, long startTime, long[] baseline, long selected) {}
     private record FairBoost(Placement thread, int baseline) {}
@@ -31,7 +32,7 @@ final class AxUiPlacement {
     private final long mGameWorkerMask;
     private final SparseArray<Placement> mGameThreads;
     private boolean mMainAttempted;
-    private long mLastDiscovery = -DISCOVERY_INTERVAL_MS;
+    private long mLastDiscovery = -GAME_DISCOVERY_INTERVAL_MS;
     private Placement mMain;
     private Placement mRender;
     private boolean mTriedRealtime;
@@ -51,21 +52,17 @@ final class AxUiPlacement {
         mGameThreads = gameWorkerMask == 0 ? null : new SparseArray<>();
     }
 
-    boolean isGamePlacement() {
-        return mGameThreads != null;
-    }
-
-    boolean isGameProcess(long startTime) {
-        return isGamePlacement() && mStartTime == startTime;
+    boolean isGameProcess(int pid, long startTime) {
+        return mPid == pid && mStartTime == startTime;
     }
 
     long refreshGame(long now) {
         if (mStartTime != startTime(mPid)) return Long.MAX_VALUE;
-        if (now - mLastDiscovery < DISCOVERY_INTERVAL_MS) {
-            return mLastDiscovery + DISCOVERY_INTERVAL_MS;
+        if (now - mLastDiscovery < GAME_DISCOVERY_INTERVAL_MS) {
+            return mLastDiscovery + GAME_DISCOVERY_INTERVAL_MS;
         }
         mLastDiscovery = now;
-        // Render and worker threads can be created after loading starts or recycle their TIDs.
+        // Names can change and TIDs can be recycled during a long session.
         for (int i = mGameThreads.size() - 1; i >= 0; i--) {
             Placement thread = mGameThreads.valueAt(i);
             if (thread.startTime() != startTime(thread.tid())) mGameThreads.removeAt(i);
@@ -75,19 +72,31 @@ final class AxUiPlacement {
             for (File task : tasks) {
                 try {
                     int tid = Integer.parseInt(task.getName());
-                    if (tid == mPid || mGameThreads.indexOfKey(tid) >= 0) continue;
+                    if (tid == mPid) continue;
                     int role = gameThreadRole(Files.readString(new File(task, "comm").toPath())
                             .trim());
-                    if (role == 0) continue;
-                    Placement thread = place(tid, role == 1 ? mMask : mGameWorkerMask);
+                    long mask = role == 0 ? 0 : role == 1 ? mMask : mGameWorkerMask;
+                    Placement thread = mGameThreads.get(tid);
+                    if (thread != null) {
+                        if ((thread.selected() & mask) != 0) continue;
+                        restore(thread);
+                        mGameThreads.remove(tid);
+                    }
+                    if (mask == 0) continue;
+                    thread = place(tid, mask);
                     if (thread != null) mGameThreads.put(tid, thread);
                 } catch (IOException | NumberFormatException ignored) {
                     // A thread can exit during discovery.
                 }
             }
+            if (mGameThreads.size() == 0) {
+                restore(mMain);
+                mMain = null;
+            } else if (mMain == null) {
+                mMain = place(mPid, mMask);
+            }
         }
-        if (mMain == null && mGameThreads.size() != 0) mMain = place(mPid, mMask);
-        return now + DISCOVERY_INTERVAL_MS;
+        return now + GAME_DISCOVERY_INTERVAL_MS;
     }
 
     static int gameThreadRole(String comm) {

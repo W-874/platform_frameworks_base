@@ -5993,6 +5993,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
     void wakeIfNeededLocked() {
         if (!mSleeping) return;
         mSleeping = false;
+        mTaskSupervisor.updateDragoniteTopGame();
         try (var unused = mActivityStateUpdater.startBatchSession()) {
             FrameworkStatsLog.write(FrameworkStatsLog.ACTIVITY_MANAGER_SLEEP_STATE_CHANGED,
                     FrameworkStatsLog.ACTIVITY_MANAGER_SLEEP_STATE_CHANGED__STATE__AWAKE);
@@ -6011,6 +6012,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
     void sleepIfNeededLocked() {
         if (mRootWindowContainer.hasAwakeDisplay() || mSleeping) return;
         mSleeping = true;
+        mTaskSupervisor.updateDragoniteTopGame();
         try (var unused = mActivityStateUpdater.startBatchSession()) {
             FrameworkStatsLog.write(FrameworkStatsLog.ACTIVITY_MANAGER_SLEEP_STATE_CHANGED,
                     FrameworkStatsLog.ACTIVITY_MANAGER_SLEEP_STATE_CHANGED__STATE__ASLEEP);

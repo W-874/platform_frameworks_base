@@ -162,6 +162,7 @@ import com.android.internal.protolog.ProtoLog;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.function.pooled.PooledLambda;
 import com.android.server.LocalServices;
+import com.android.server.axdragonite.AxDragoniteService;
 import com.android.server.am.ActivityManagerService;
 import com.android.server.am.HostingRecord;
 import com.android.server.am.UserState;
@@ -2444,6 +2445,7 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
                 // according to the current top focused activity.
                 mService.updateTopApp(null /* topResumedActivity */);
             }
+            updateDragoniteTopGame();
             return mTopResumedActivity;
         }
 
@@ -2477,7 +2479,26 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
             mService.updateTopApp(mTopResumedActivity);
         }
 
+        updateDragoniteTopGame();
         return mTopResumedActivity;
+    }
+
+    void updateDragoniteTopGame() {
+        final ActivityRecord top = mTopResumedActivity;
+        final WindowProcessController app = top != null ? top.app : null;
+        if (mService.isSleepingLocked() || app == null || !app.hasThread()
+                || top.getUid() != app.mUid) {
+            AxDragoniteService.setTopGame(null, -1, 0, null);
+        } else {
+            AxDragoniteService.setTopGame(top.packageName, app.mUid, app.getPid(),
+                    app.getThread().asBinder());
+        }
+    }
+
+    void onDragoniteProcessThreadChanged(WindowProcessController app) {
+        if (mTopResumedActivity != null && mTopResumedActivity.app == app) {
+            updateDragoniteTopGame();
+        }
     }
 
     /** Schedule current top resumed activity state loss */

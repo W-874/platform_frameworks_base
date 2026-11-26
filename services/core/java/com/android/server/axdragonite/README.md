@@ -29,6 +29,35 @@ Sagit keeps the GPU in the existing HAL/graphics privilege boundary and does
 not grant SystemServer generic KGSL sysfs access. HAL GPU votes remain in
 the diagnostic output; they are requests, not measured clocks.
 
+## Foreground games and scene isolation
+
+The focused top-resumed activity identifies the only eligible process; a UID
+in `PROCESS_STATE_TOP` is not enough on its own. GameManagerService checks
+the package's UID, game category and Performance mode for the current user.
+The scene worker rechecks the app-thread Binder and process start time, and
+observes WM focus, attach/death, sleep, UID state, mode and user changes.
+This replaces the Axion `SCENE_GAME_1` toggle with a process-scoped session,
+without a package allowlist or writable named-affinity proc nodes.
+
+While eligible, named render threads use the big cluster and named workers
+the little cluster, intersected with their pre-vote affinity. The worker
+rediscovers names and recycled threads once a second. A UI placement lease
+wins over the game; the session can resume placement without another game
+report. Only an authenticated loading edge from the admitted game process
+can vote the separate 640 ms Dragonite loading hint. The session itself
+never requests CPU/GPU floors; Android's ordinary GameManager modes and
+UWU's UI remain in place.
+
+The same arbiter sends held, bounded top-app votes for shade and unlock
+(`0-3`, restoring `0-7`) and background votes for launch and system fling
+(`0`, restoring `0-1`). Top-app restriction yields to pending game placement
+or UI placement in top-app (including unknown membership). Background is
+already little-only. Camera remains an independent hint on its own node.
+The two-cluster policy does not copy Axion's 6+2 branch, move processes
+between groups, modify ART properties on fling, freeze background apps, or
+detect benchmarks to override user policy. Init supplies the boot defaults;
+only the existing libperfmgr HAL writes these masks at runtime.
+
 ## Process, platform, memory and ART
 
 - `ax_process_utils` implements affinity, thread priority, and cpuset/profile

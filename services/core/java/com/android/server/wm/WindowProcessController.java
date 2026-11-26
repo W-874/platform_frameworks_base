@@ -430,6 +430,7 @@ public class WindowProcessController extends ConfigurationContainer<Configuratio
     public void setThread(IApplicationThread thread) {
         synchronized (mAtm.mGlobalLockWithoutBoost) {
             mThread = thread;
+            mAtm.mTaskSupervisor.onDragoniteProcessThreadChanged(this);
             // In general this is called from attaching application, so the last configuration
             // has been sent to client by {@link android.app.IApplicationThread#bindApplication}.
             // If this process is system server, it is fine because system is booting and a new

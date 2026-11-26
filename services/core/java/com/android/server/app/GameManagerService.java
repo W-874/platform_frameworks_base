@@ -158,7 +158,8 @@ public final class GameManagerService extends IGameManagerService.Stub {
     private static final String GAME_MODE_INTERVENTION_LIST_FILE_NAME =
             "game_mode_intervention.list";
 
-    private record GameStateRequest(GameState state, AxDragoniteService.GameCaller caller) {}
+    private record GameStateRequest(GameState state, int uid,
+            AxDragoniteService.GameCaller caller) {}
 
     static {
         LazyJniRegistrar.registerGameManagerService();
@@ -372,6 +373,7 @@ public final class GameManagerService extends IGameManagerService.Stub {
                     }
                     final String[] packageNames = getInstalledGamePackageNames(userId);
                     updateConfigsForUser(userId, false /*checkGamePackage*/, packageNames);
+                    AxDragoniteService.gamePolicyChanged();
                     break;
                 }
                 case SET_GAME_STATE: {
@@ -392,6 +394,7 @@ public final class GameManagerService extends IGameManagerService.Stub {
                         Slog.v(TAG, "Failed to get package metadata");
                         uid = -1;
                     }
+                    if (uid < 0 || uid != request.uid()) break;
                     FrameworkStatsLog.write(FrameworkStatsLog.GAME_STATE_CHANGED, packageName, uid,
                             boostEnabled, gameStateModeToStatsdGameState(gameState.getMode()),
                             isLoading, gameState.getLabel(), gameState.getQuality());
@@ -409,10 +412,8 @@ public final class GameManagerService extends IGameManagerService.Stub {
                                 "Game loading power mode %s (game state change isLoading=%b)",
                                         isLoading ? "ON" : "OFF", isLoading));
                         mPowerManagerInternal.setPowerMode(Mode.GAME_LOADING, isLoading);
-                        if (uid >= 0) {
-                            AxDragoniteService.requestGameLoading(packageName + ":" + userId,
-                                    uid, request.caller(), isLoading);
-                        }
+                        AxDragoniteService.requestGameLoading(packageName, uid, request.caller(),
+                                isLoading);
                         if (isLoading) {
                             int loadingBoostDuration = getLoadingBoostDuration(packageName, userId);
                             loadingBoostDuration = loadingBoostDuration > 0 ? loadingBoostDuration
@@ -495,13 +496,14 @@ public final class GameManagerService extends IGameManagerService.Stub {
             // Restrict to games only.
             return;
         }
+        if (!isValidPackageName(packageName, userId)) return;
         final Message msg = mHandler.obtainMessage(SET_GAME_STATE);
         final Bundle data = new Bundle();
         data.putString(PACKAGE_NAME_MSG_KEY, packageName);
         data.putInt(USER_ID_MSG_KEY, userId);
         msg.setData(data);
-        msg.obj = new GameStateRequest(gameState,
-                gameState.isLoading() ? AxDragoniteService.captureGameCaller() : null);
+        msg.obj = new GameStateRequest(gameState, Binder.getCallingUid(),
+                AxDragoniteService.captureGameCaller());
         mHandler.sendMessage(msg);
     }
 
@@ -1204,6 +1206,7 @@ public final class GameManagerService extends IGameManagerService.Stub {
             fromGameMode = userSettings.getGameModeLocked(packageName);
             userSettings.setGameModeLocked(packageName, gameMode);
         }
+        AxDragoniteService.gamePolicyChanged();
         updateInterventions(packageName, gameMode, userId);
         synchronized (mGameModeListenerLock) {
             for (IGameModeListener listener : mGameModeListeners.keySet()) {
@@ -1654,6 +1657,7 @@ public final class GameManagerService extends IGameManagerService.Stub {
 
     void onUserSwitching(TargetUser from, TargetUser to) {
         final int toUserId = to.getUserIdentifier();
+        AxDragoniteService.gameUserSwitching(toUserId);
         // we want to re-populate the setting when switching user as the device config may have
         // changed, which will only update for the previous user, see
         // DeviceConfigListener#onPropertiesChanged.
@@ -2128,6 +2132,20 @@ public final class GameManagerService extends IGameManagerService.Stub {
         atmi.registerCompatScaleProvider(COMPAT_SCALE_MODE_GAME, localService);
 
         LocalServices.addService(GameManagerInternal.class, localService);
+        AxDragoniteService.registerGamePolicy(this::isPerformanceGameForUid);
+    }
+
+    private boolean isPerformanceGameForUid(String packageName, int uid) {
+        int userId = UserHandle.getUserId(uid);
+        try {
+            ApplicationInfo info = mPackageManager.getApplicationInfoAsUser(packageName,
+                    PackageManager.MATCH_ALL, userId);
+            return info.uid == uid && info.category == ApplicationInfo.CATEGORY_GAME
+                    && getGameModeFromSettingsUnchecked(packageName, userId)
+                            == GameManager.GAME_MODE_PERFORMANCE;
+        } catch (NameNotFoundException e) {
+            return false;
+        }
     }
 
     private void registerStatsCallbacks() {
@@ -2302,6 +2320,7 @@ public final class GameManagerService extends IGameManagerService.Stub {
     final class MyUidObserver extends UidObserver {
         @Override
         public void onUidGone(int uid, boolean disabled) {
+            AxDragoniteService.gameUidChanged(uid);
             synchronized (mUidObserverLock) {
                 handleUidMovedOffTop(uid);
             }
@@ -2309,6 +2328,7 @@ public final class GameManagerService extends IGameManagerService.Stub {
 
         @Override
         public void onUidStateChanged(int uid, int procState, long procStateSeq, int capability) {
+            AxDragoniteService.gameUidChanged(uid);
             switch (procState) {
                 case ActivityManager.PROCESS_STATE_TOP:
                     handleUidMovedToTop(uid);

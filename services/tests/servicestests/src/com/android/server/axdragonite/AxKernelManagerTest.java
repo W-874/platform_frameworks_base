@@ -23,7 +23,8 @@ public class AxKernelManagerTest {
         assertFalse(cpuOnly.boostRendering());
         assertFalse(cpuOnly.placeUi());
         assertFalse(cpuOnly.limitCameraCpuset());
-        assertFalse(cpuOnly.placeGameThreads());
+        assertFalse(cpuOnly.limitTopAppCpuset());
+        assertFalse(cpuOnly.limitBackgroundCpuset());
         assertEquals(AxKernelManager.HEAVY, cpuOnly.level());
         assertEquals(900, cpuOnly.durationMs());
 
@@ -39,10 +40,11 @@ public class AxKernelManagerTest {
     @Test
     public void sceneOptInsDoNotEnableUiPlacementOrRendering() throws Exception {
         AxKernelManager.Scene scene = parse("""
-                <scene level="heavy" durationMs="640" placeGameThreads="true"
-                       limitCameraCpuset="true" />
+                <scene level="heavy" durationMs="640" limitCameraCpuset="true"
+                       limitTopAppCpuset="true" limitBackgroundCpuset="true" />
                 """);
-        assertTrue(scene.placeGameThreads());
+        assertTrue(scene.limitTopAppCpuset());
+        assertTrue(scene.limitBackgroundCpuset());
         assertTrue(scene.limitCameraCpuset());
         assertFalse(scene.placeUi());
         assertFalse(scene.boostRendering());

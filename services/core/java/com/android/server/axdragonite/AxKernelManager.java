@@ -36,6 +36,8 @@ final class AxKernelManager {
     private static final String[] CPU_HINTS = {null, "AX_DRAGONITE_LIGHT", "AX_DRAGONITE_HEAVY"};
     private static final String GPU_RENDERING_HINT = "AX_DRAGONITE_GPU_RENDERING";
     private static final String CAMERA_CPUSET_HINT = "AX_DRAGONITE_CAMERA_CPUSET";
+    private static final String TOP_APP_CPUSET_HINT = "AX_DRAGONITE_TOP_APP_CPUSET";
+    private static final String BACKGROUND_CPUSET_HINT = "AX_DRAGONITE_BACKGROUND_CPUSET";
     static final String GOVERNOR = "ax_dragonite_cpu_governor";
     static final String CPU_PROFILE = "ax_dragonite_cpu_profile";
     static final String GPU_PROFILE = "ax_dragonite_gpu_profile";
@@ -52,18 +54,25 @@ final class AxKernelManager {
     }
 
     record Scene(int level, int durationMs, boolean placeUi, boolean boostRendering,
-            boolean placeGameThreads, boolean limitCameraCpuset) {}
+            boolean limitCameraCpuset, boolean limitTopAppCpuset, boolean limitBackgroundCpuset) {}
 
     final SparseArray<Scene> scenes = new SparseArray<>();
     private final AxPowerVote mCpuVote = new AxPowerVote(SystemClock::uptimeMillis);
     private final AxPowerVote mGpuVote = new AxPowerVote(SystemClock::uptimeMillis);
     private final AxPowerVote mCameraVote = new AxPowerVote(SystemClock::uptimeMillis);
+    private final AxPowerVote mTopAppVote = new AxPowerVote(SystemClock::uptimeMillis);
+    private final AxPowerVote mBackgroundVote = new AxPowerVote(SystemClock::uptimeMillis);
+    final boolean foregroundGame;
     final long performanceMask;
     final long gameWorkerMask;
     private boolean mHasRenderingScenes;
     private boolean mRenderingSupported;
     private boolean mHasCameraScenes;
     private boolean mCameraSupported;
+    private boolean mHasTopAppScenes;
+    private boolean mTopAppSupported;
+    private boolean mHasBackgroundScenes;
+    private boolean mBackgroundSupported;
     private IPowerExt mHal;
     private AxPowerVote.Boost mBoost;
     private IBinder.DeathRecipient mDeathRecipient;
@@ -90,13 +99,16 @@ final class AxKernelManager {
         mBoost = null;
         mRenderingSupported = false;
         mCameraSupported = false;
+        mTopAppSupported = false;
+        mBackgroundSupported = false;
     }
 
     static boolean isConfigured() {
         return ProductPolicy.FILE.isFile();
     }
 
-    private AxKernelManager(long performanceMask, long gameWorkerMask) {
+    private AxKernelManager(long performanceMask, long gameWorkerMask, boolean foregroundGame) {
+        this.foregroundGame = foregroundGame;
         this.performanceMask = performanceMask;
         this.gameWorkerMask = gameWorkerMask;
     }
@@ -114,7 +126,8 @@ final class AxKernelManager {
     private static AxKernelManager parse(XmlPullParser parser, long performanceMask,
             long gameWorkerMask) throws IOException, XmlPullParserException {
         XmlUtils.beginDocument(parser, "dragonite");
-        AxKernelManager manager = new AxKernelManager(performanceMask, gameWorkerMask);
+        AxKernelManager manager = new AxKernelManager(performanceMask, gameWorkerMask,
+                Boolean.parseBoolean(parser.getAttributeValue(null, "foregroundGame")));
         final int depth = parser.getDepth();
         while (XmlUtils.nextElementWithin(parser, depth)) {
             if (!"scene".equals(parser.getName())) {
@@ -127,6 +140,8 @@ final class AxKernelManager {
             Scene scene = parseScene(parser, id);
             manager.mHasRenderingScenes |= scene.boostRendering();
             manager.mHasCameraScenes |= scene.limitCameraCpuset();
+            manager.mHasTopAppScenes |= scene.limitTopAppCpuset();
+            manager.mHasBackgroundScenes |= scene.limitBackgroundCpuset();
             manager.scenes.put(id, scene);
         }
         return manager;
@@ -148,12 +163,14 @@ final class AxKernelManager {
         }
         return new Scene(level, duration,
                 Boolean.parseBoolean(parser.getAttributeValue(null, "placeUi")), gpuProfile != null,
-                Boolean.parseBoolean(parser.getAttributeValue(null, "placeGameThreads")),
-                Boolean.parseBoolean(parser.getAttributeValue(null, "limitCameraCpuset")));
+                Boolean.parseBoolean(parser.getAttributeValue(null, "limitCameraCpuset")),
+                Boolean.parseBoolean(parser.getAttributeValue(null, "limitTopAppCpuset")),
+                Boolean.parseBoolean(parser.getAttributeValue(null, "limitBackgroundCpuset")));
     }
 
     // Called on the Dragonite worker only. libperfmgr remains the sole shared node writer.
-    boolean apply(int level, long until, long gpuUntil, long cameraUntil,
+    boolean apply(int level, long until, long gpuUntil, long cameraUntil, long topAppUntil,
+            long backgroundUntil,
             Consumer<IBinder> onHalDied) {
         try {
             boolean reconnect = mHal == null;
@@ -168,6 +185,9 @@ final class AxKernelManager {
                 }
                 boolean rendering = mHasRenderingScenes && hal.isBoostSupported(GPU_RENDERING_HINT);
                 boolean camera = mHasCameraScenes && hal.isBoostSupported(CAMERA_CPUSET_HINT);
+                boolean topApp = mHasTopAppScenes && hal.isBoostSupported(TOP_APP_CPUSET_HINT);
+                boolean background = mHasBackgroundScenes
+                        && hal.isBoostSupported(BACKGROUND_CPUSET_HINT);
                 IBinder extension = hal.asBinder();
                 IBinder.DeathRecipient recipient = () -> onHalDied.accept(extension);
                 extension.linkToDeath(recipient, 0);
@@ -177,6 +197,8 @@ final class AxKernelManager {
                 mSupportedModes = supported;
                 mRenderingSupported = rendering;
                 mCameraSupported = camera;
+                mTopAppSupported = topApp;
+                mBackgroundSupported = background;
             }
             final int requested = mRequestedModes & mSupportedModes;
             final int previous = reconnect ? mSupportedModes & ~requested : mActiveModes;
@@ -201,6 +223,12 @@ final class AxKernelManager {
             mCameraVote.apply(mBoost,
                     mCameraSupported && cameraUntil != 0 ? CAMERA_CPUSET_HINT : null,
                     cameraUntil, reconnect);
+            mTopAppVote.apply(mBoost,
+                    mTopAppSupported && topAppUntil != 0 ? TOP_APP_CPUSET_HINT : null,
+                    topAppUntil, reconnect);
+            mBackgroundVote.apply(mBoost,
+                    mBackgroundSupported && backgroundUntil != 0 ? BACKGROUND_CPUSET_HINT : null,
+                    backgroundUntil, reconnect);
             return true;
         } catch (RemoteException e) {
             Slog.w(TAG, "Power HAL extension unavailable", e);
@@ -215,6 +243,8 @@ final class AxKernelManager {
                 + " halConnected=" + (mHal != null));
         pw.println("  gpuHint=" + mGpuVote.hint() + " expiresUptime=" + mGpuVote.until()
                 + " renderingSupported=" + mRenderingSupported);
+        pw.println("  cpusetHintUntil: camera=" + mCameraVote.until()
+                + " topApp=" + mTopAppVote.until() + " background=" + mBackgroundVote.until());
         for (int i = 0; i < MODES.length; i++) {
             int bit = 1 << i;
             pw.println("  " + MODES[i] + " requested=" + ((mRequestedModes & bit) != 0)

@@ -205,9 +205,11 @@ class DeviceSettingRepositoryImpl(
             } else {
                 null
             },
-            updateState = { newState ->
-                coroutineScope.launch(backgroundCoroutineContext) {
-                    connection.updateDeviceSettings(settingId, newState.toParcelable())
+            updateState = pref.extras.getString(DeviceSettingContract.PREFERENCE_UPDATE_TOKEN).let { token ->
+                { newState: DeviceSettingStateModel.ActionSwitchPreferenceState ->
+                    coroutineScope.launch(backgroundCoroutineContext) {
+                        connection.updateDeviceSettings(settingId, newState.toParcelable(token))
+                    }
                 }
             },
         )
@@ -220,9 +222,11 @@ class DeviceSettingRepositoryImpl(
             isAllowedChangingState = pref.isAllowedChangingState,
             isActive = pref.isActive,
             state = DeviceSettingStateModel.MultiTogglePreferenceState(pref.state),
-            updateState = { newState ->
-                coroutineScope.launch(backgroundCoroutineContext) {
-                    connection.updateDeviceSettings(settingId, newState.toParcelable())
+            updateState = pref.extras.getString(DeviceSettingContract.PREFERENCE_UPDATE_TOKEN).let { token ->
+                { newState: DeviceSettingStateModel.MultiTogglePreferenceState ->
+                    coroutineScope.launch(backgroundCoroutineContext) {
+                        connection.updateDeviceSettings(settingId, newState.toParcelable(token))
+                    }
                 }
             },
         )

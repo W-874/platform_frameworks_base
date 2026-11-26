@@ -16,6 +16,8 @@
 
 package com.android.settingslib.bluetooth.devicesettings.shared.model
 
+import android.os.Bundle
+import com.android.settingslib.bluetooth.devicesettings.DeviceSettingContract.PREFERENCE_UPDATE_TOKEN
 import com.android.settingslib.bluetooth.devicesettings.DeviceSettingPreferenceState
 
 /** Models a device setting state. */
@@ -24,17 +26,29 @@ sealed interface DeviceSettingStateModel {
 
     /** Models a device setting state for action/switch preference. */
     data class ActionSwitchPreferenceState(val checked: Boolean) : DeviceSettingStateModel {
-        override fun toParcelable() =
+        override fun toParcelable() = toParcelable(null)
+
+        internal fun toParcelable(updateToken: String?) =
             com.android.settingslib.bluetooth.devicesettings.ActionSwitchPreferenceState.Builder()
                 .setChecked(checked)
+                .setExtras(updateExtras(updateToken))
                 .build()
     }
 
     /** Models a device setting state for multi-toggle preference. */
     data class MultiTogglePreferenceState(val selectedIndex: Int) : DeviceSettingStateModel {
-        override fun toParcelable() =
+        override fun toParcelable() = toParcelable(null)
+
+        internal fun toParcelable(updateToken: String?) =
             com.android.settingslib.bluetooth.devicesettings.MultiTogglePreferenceState.Builder()
                 .setState(selectedIndex)
+                .setExtras(updateExtras(updateToken))
                 .build()
     }
+}
+
+private fun updateExtras(token: String?): Bundle = if (token == null) {
+    Bundle.EMPTY
+} else {
+    Bundle().apply { putString(PREFERENCE_UPDATE_TOKEN, token) }
 }

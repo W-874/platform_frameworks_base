@@ -19,4 +19,7 @@ package com.android.settingslib.bluetooth.devicesettings
 /** The contract between the device settings provider services and Settings. */
 object DeviceSettingContract {
     const val INVISIBLE_PROFILES = "INVISIBLE_PROFILES"
+
+    /** Opaque string echoed from a rendered preference into its update state extras. */
+    const val PREFERENCE_UPDATE_TOKEN = "com.android.settingslib.bluetooth.devicesettings.extra.PREFERENCE_UPDATE_TOKEN"
 }

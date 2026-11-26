@@ -22,6 +22,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.graphics.Bitmap
+import android.os.Bundle
 import com.android.settingslib.bluetooth.CachedBluetoothDevice
 import com.android.settingslib.bluetooth.devicesettings.ActionSwitchPreference
 import com.android.settingslib.bluetooth.devicesettings.ActionSwitchPreferenceState
@@ -29,6 +30,7 @@ import com.android.settingslib.bluetooth.devicesettings.BannerPreference
 import com.android.settingslib.bluetooth.devicesettings.ButtonInfo
 import com.android.settingslib.bluetooth.devicesettings.DeviceInfo
 import com.android.settingslib.bluetooth.devicesettings.DeviceSetting
+import com.android.settingslib.bluetooth.devicesettings.DeviceSettingContract.PREFERENCE_UPDATE_TOKEN
 import com.android.settingslib.bluetooth.devicesettings.DeviceSettingGroup
 import com.android.settingslib.bluetooth.devicesettings.DeviceSettingHelpPreference
 import com.android.settingslib.bluetooth.devicesettings.DeviceSettingId
@@ -62,9 +64,11 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.ArgumentMatchers.anyString
+import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mock
 import org.mockito.Mockito.doReturn
 import org.mockito.Mockito.verify
@@ -364,7 +368,12 @@ class DeviceSettingRepositoryTest {
         testScope.runTest {
             setUpConfigService(true, DEVICE_SETTING_CONFIG)
             setUpProviderService(settingProviderService1, true, listOf())
-            setUpProviderService(settingProviderService2, true, listOf(DEVICE_SETTING_2))
+            val extras = Bundle().apply { putString(PREFERENCE_UPDATE_TOKEN, "rendered-token") }
+            val preference = MultiTogglePreference.Builder().setTitle("Noise control")
+                .setExtras(extras).build()
+            val anc = DeviceSetting.Builder().setSettingId(DeviceSettingId.DEVICE_SETTING_ID_ANC)
+                .setPreference(preference).build()
+            setUpProviderService(settingProviderService2, true, listOf(anc))
             var setting: DeviceSettingModel? = null
 
             underTest
@@ -373,19 +382,16 @@ class DeviceSettingRepositoryTest {
                 .launchIn(backgroundScope)
             runCurrent()
             val updateFunc = (setting as DeviceSettingModel.MultiTogglePreference).updateState
+            extras.putString(PREFERENCE_UPDATE_TOKEN, "mutated-token")
             updateFunc(DeviceSettingStateModel.MultiTogglePreferenceState(2))
             runCurrent()
 
-            verify(settingProviderService2)
-                .updateDeviceSettings(
-                    DEVICE_INFO,
-                    DeviceSettingState.Builder()
-                        .setSettingId(DeviceSettingId.DEVICE_SETTING_ID_ANC)
-                        .setPreferenceState(
-                            MultiTogglePreferenceState.Builder().setState(2).build()
-                        )
-                        .build(),
-                )
+            val captured = ArgumentCaptor.forClass(DeviceSettingState::class.java)
+            verify(settingProviderService2).updateDeviceSettings(eq(DEVICE_INFO), captured.capture())
+            assertThat(captured.value.settingId).isEqualTo(DeviceSettingId.DEVICE_SETTING_ID_ANC)
+            val state = captured.value.preferenceState as MultiTogglePreferenceState
+            assertThat(state.state).isEqualTo(2)
+            assertThat(state.extras.getString(PREFERENCE_UPDATE_TOKEN)).isEqualTo("rendered-token")
         }
     }
 

@@ -23,6 +23,7 @@ import android.util.Log
 import androidx.annotation.FloatRange
 import com.android.app.tracing.TraceStateLogger
 import com.android.app.tracing.TrackGroupUtils.trackGroup
+import com.android.internal.dragonite.AxDragonite
 import com.android.systemui.dagger.SysUISingleton
 import com.android.systemui.util.Compile
 import java.util.concurrent.CopyOnWriteArrayList
@@ -86,6 +87,11 @@ class ShadeExpansionStateManager @Inject constructor() {
         this.fraction = fraction
         this.expanded = expanded
         this.tracking = tracking
+        if (tracking || (fraction > 0f && fraction < 1f)) {
+            AxDragonite.pulse(AxDragonite.SHADE)
+        } else {
+            AxDragonite.end(AxDragonite.SHADE)
+        }
 
         var fullyClosed = true
         var fullyOpened = false

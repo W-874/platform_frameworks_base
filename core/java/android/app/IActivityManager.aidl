@@ -1081,4 +1081,7 @@ interface IActivityManager {
      * Unregisters the listener previously registered for ANR warning.
      */
     void unregisterAnrWarningListener(in IAnrWarningCallback callback);
+
+    // Append so existing transaction numbers remain unchanged.
+    void setAxDragoniteScene(in IBinder owner, int scene, boolean active);
 }

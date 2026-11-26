@@ -947,6 +947,8 @@ class ActivityMetricsLogger {
         mTransitionInfoList.add(newInfo);
         mLastTransitionInfo.put(launchedActivity, newInfo);
         startLaunchTrace(newInfo);
+        com.android.server.axdragonite.AxDragoniteService.request(newInfo,
+                axLaunchScene(newInfo), 0, true);
         if (newInfo.isInterestingToLoggerAndObserver()) {
             launchObserverNotifyActivityLaunched(newInfo);
         } else {
@@ -1300,6 +1302,12 @@ class ActivityMetricsLogger {
         done(true /* abort */, info, cause, 0L /* timestampNs */);
     }
 
+    private static int axLaunchScene(TransitionInfo info) {
+        return info.mTransitionType == TYPE_TRANSITION_COLD_LAUNCH
+                ? com.android.internal.dragonite.AxDragonite.APP_LAUNCH_COLD
+                : com.android.internal.dragonite.AxDragonite.APP_LAUNCH_WARM;
+    }
+
     /** Called when the given transition (info) is no longer active. */
     private void done(boolean abort, @NonNull TransitionInfo info, String cause,
             long timestampNs) {
@@ -1309,6 +1317,11 @@ class ActivityMetricsLogger {
         }
         info.mLaunchingState.stopTrace(abort, info, cause);
         stopLaunchTrace(info);
+        // Launch temperature may change when a warm process dies before its first draw.
+        com.android.server.axdragonite.AxDragoniteService.request(info,
+                com.android.internal.dragonite.AxDragonite.APP_LAUNCH_COLD, 0, false);
+        com.android.server.axdragonite.AxDragoniteService.request(info,
+                com.android.internal.dragonite.AxDragonite.APP_LAUNCH_WARM, 0, false);
         final Boolean isHibernating =
                 mLastHibernationStates.remove(info.mLastLaunchedActivity.packageName);
         if (abort) {

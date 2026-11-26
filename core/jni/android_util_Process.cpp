@@ -529,6 +529,26 @@ jlongArray android_os_Process_getSchedAffinity(JNIEnv* env, jobject clazz, jint 
     return masks;
 }
 
+void android_os_Process_setSchedAffinity(JNIEnv* env, jclass, jint tid, jlongArray masks) {
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    constexpr size_t maxMasks = sizeof(cpus) / sizeof(__CPU_BITTYPE);
+    if (tid <= 0 || masks == nullptr || env->GetArrayLength(masks) <= 0 ||
+        static_cast<size_t>(env->GetArrayLength(masks)) > maxMasks) {
+        jniThrowException(env, "java/lang/IllegalArgumentException", "Invalid CPU mask or TID");
+        return;
+    }
+    const jsize count = env->GetArrayLength(masks);
+    jlong bits[maxMasks];
+    env->GetLongArrayRegion(masks, 0, count, bits);
+    if (env->ExceptionCheck()) return;
+    for (jsize i = 0; i < count; ++i) cpus.__bits[i] = bits[i];
+    if (sched_setaffinity(tid, sizeof(cpus), &cpus) != 0) {
+        signalExceptionForError(env, errno, tid);
+    }
+}
+
+
 jint android_os_Process_getThreadScheduler(JNIEnv* env, jclass clazz,
                                               jint tid)
 {
@@ -1374,6 +1394,7 @@ static const JNINativeMethod methods[] = {
         {"createProcessGroup", "(II)I", (void*)android_os_Process_createProcessGroup},
         {"getExclusiveCores", "()[I", (void*)android_os_Process_getExclusiveCores},
         {"getSchedAffinity", "(I)[J", (void*)android_os_Process_getSchedAffinity},
+        {"setSchedAffinity", "(I[J)V", (void*)android_os_Process_setSchedAffinity},
         {"setArgV0Native", "(Ljava/lang/String;)V", (void*)android_os_Process_setArgV0},
         {"setUid", "(I)I", (void*)android_os_Process_setUid},
         {"setGid", "(I)I", (void*)android_os_Process_setGid},

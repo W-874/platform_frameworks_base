@@ -2197,6 +2197,8 @@ public class KeyguardViewMediator implements CoreStartable,
     public void onStartedWakingUp(@PowerManager.WakeReason int pmWakeReason,
             boolean cameraGestureTriggered) {
         Trace.beginSection("KeyguardViewMediator#onStartedWakingUp");
+        com.android.internal.dragonite.AxDragonite.pulse(
+                com.android.internal.dragonite.AxDragonite.WAKE);
 
         // TODO: Rename all screen off/on references to interactive/sleeping
         synchronized (this) {
@@ -4319,6 +4321,13 @@ public class KeyguardViewMediator implements CoreStartable,
 
     @Override
     public void onDozeAmountChanged(float linear, float interpolated) {
+        if (linear > 0f && linear < 1f) {
+            com.android.internal.dragonite.AxDragonite.pulse(
+                    com.android.internal.dragonite.AxDragonite.DOZE);
+        } else {
+            com.android.internal.dragonite.AxDragonite.end(
+                    com.android.internal.dragonite.AxDragonite.DOZE);
+        }
         // If we were animating the screen off, and we've completed the doze animation (doze amount
         // is 1f), then show the activity lock screen.
         if (mAnimatingScreenOff && mDozing && linear == 1f) {

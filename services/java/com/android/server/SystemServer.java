@@ -3690,6 +3690,8 @@ public final class SystemServer implements Dumpable {
         }
         t.traceEnd();
 
+        com.android.server.axdragonite.AxDragoniteService.start(context);
+
         t.traceBegin("StartSystemUI");
         try {
             startSystemUi(context, windowManagerF);

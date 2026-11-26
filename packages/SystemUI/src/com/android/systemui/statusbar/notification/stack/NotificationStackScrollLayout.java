@@ -4794,6 +4794,13 @@ public class NotificationStackScrollLayout
     void setIsBeingDragged(boolean isDragged) {
         mIsBeingDragged = isDragged;
         if (isDragged) {
+            com.android.internal.dragonite.AxDragonite.pulse(
+                    com.android.internal.dragonite.AxDragonite.NOTIFICATION_SCROLL);
+        } else {
+            com.android.internal.dragonite.AxDragonite.end(
+                    com.android.internal.dragonite.AxDragonite.NOTIFICATION_SCROLL);
+        }
+        if (isDragged) {
             requestDisallowInterceptTouchEvent(true);
             cancelLongPress();
             resetExposedMenuView(true /* animate */, true /* force */);

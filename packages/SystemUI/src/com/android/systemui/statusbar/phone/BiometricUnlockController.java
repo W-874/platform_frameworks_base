@@ -526,6 +526,10 @@ public class BiometricUnlockController extends KeyguardUpdateMonitorCallback imp
     ) {
         Trace.beginSection("BiometricUnlockController#startWakeAndUnlock");
         mLogger.logStartWakeAndUnlock(mode);
+        if (mode != MODE_NONE) {
+            com.android.internal.dragonite.AxDragonite.pulse(
+                    com.android.internal.dragonite.AxDragonite.BIOMETRIC);
+        }
         boolean wasDeviceInteractive = mUpdateMonitor.isDeviceInteractive();
         mMode = mode;
         if (mMode == MODE_WAKE_AND_DISMISS_PULSING) {

@@ -1389,6 +1389,11 @@ public class Process {
      */
     public static final native long[] getSchedAffinity(int tid);
 
+    /** Sets a thread's CPU affinity using the representation returned by getSchedAffinity.
+     * @hide
+     */
+    public static native void setSchedAffinity(int tid, long[] masks);
+
     /**
      * Set the priority of the calling thread, based on Linux niceness priorities.  See
      * {@link #setThreadPriority(int, int)} for more information. This is preferred over

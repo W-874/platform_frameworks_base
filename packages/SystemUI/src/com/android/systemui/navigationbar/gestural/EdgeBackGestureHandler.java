@@ -1229,6 +1229,8 @@ public class EdgeBackGestureHandler {
                                 pilferPointers(ev.getDisplayId());
                             }
                             mThresholdCrossed = true;
+                            com.android.internal.dragonite.AxDragonite.pulse(
+                                    com.android.internal.dragonite.AxDragonite.GESTURE);
                         } else {
                             logGesture(SysUiStatsLog.BACK_GESTURE__TYPE__INCOMPLETE_FAR_FROM_EDGE);
                         }

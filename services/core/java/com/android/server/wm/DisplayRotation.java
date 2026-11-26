@@ -599,6 +599,8 @@ public class DisplayRotation {
                 mLastSensorRotation);
 
         mRotation = rotation;
+        com.android.server.axdragonite.AxDragoniteService.request(this,
+                com.android.internal.dragonite.AxDragonite.ROTATION, 0, true);
 
         mDisplayContent.applyFixedRotationForNonTopVisibleActivityIfNeeded();
         mDisplayContent.setLayoutNeeded();

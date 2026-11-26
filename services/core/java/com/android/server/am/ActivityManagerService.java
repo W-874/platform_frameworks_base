@@ -11209,6 +11209,12 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     @Override
     protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+        if (args != null && args.length == 1 && "axdragonite".equals(args[0])) {
+            mContext.enforceCallingOrSelfPermission(android.Manifest.permission.DUMP,
+                    "dump AxDragonite");
+            com.android.server.axdragonite.AxDragoniteService.dumpState(pw);
+            return;
+        }
         PriorityDump.dump(mPriorityDumper, fd, pw, args);
     }
 
@@ -21301,6 +21307,18 @@ public class ActivityManagerService extends IActivityManager.Stub
     @Override
     public void unregisterAnrWarningListener(IAnrWarningCallback callback) {
         mAnrWarningController.unregisterAnrWarningListener(Binder.getCallingUid(), callback);
+    }
+
+    @Override
+    public void setAxDragoniteScene(IBinder owner, int scene, boolean active) {
+        final boolean launcher = mAtmInternal != null
+                && mAtmInternal.isCallerRecents(Binder.getCallingUid())
+                && (scene == com.android.internal.dragonite.AxDragonite.QUICK_SWITCH
+                    || scene == com.android.internal.dragonite.AxDragonite.LAUNCHER_ANIMATION);
+        if (!launcher && checkCallingPermission(android.Manifest.permission.DEVICE_POWER)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+        com.android.server.axdragonite.AxDragoniteService.requestClient(
+                owner, scene, Binder.getCallingPid(), active);
     }
 
     /** Notifies the app about a potential ANR. */

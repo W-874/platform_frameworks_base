@@ -369,6 +369,13 @@ public class KeyguardStateControllerImpl implements KeyguardStateController {
             Trace.traceCounter(Trace.TRACE_TAG_APP, "keyguard##GoingAway",
                     keyguardGoingAway ? 1 : 0);
             mKeyguardGoingAway = keyguardGoingAway;
+            if (keyguardGoingAway) {
+                com.android.internal.dragonite.AxDragonite.pulse(
+                        com.android.internal.dragonite.AxDragonite.UNLOCK);
+            } else {
+                com.android.internal.dragonite.AxDragonite.end(
+                        com.android.internal.dragonite.AxDragonite.UNLOCK);
+            }
             mKeyguardInteractorLazy.get().setIsKeyguardGoingAway(keyguardGoingAway);
             invokeForEachCallback(Callback::onKeyguardGoingAwayChanged);
         }

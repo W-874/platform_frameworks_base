@@ -327,6 +327,15 @@ constructor(
                     (field * 100).toInt(),
                 )
                 invalidate()
+                if (value > 0.001f && value < 0.999f) {
+                    com.android.internal.dragonite.AxDragonite.pulse(
+                        com.android.internal.dragonite.AxDragonite.SYSTEMUI_ANIMATION
+                    )
+                } else {
+                    com.android.internal.dragonite.AxDragonite.end(
+                        com.android.internal.dragonite.AxDragonite.SYSTEMUI_ANIMATION
+                    )
+                }
             }
         }
 

@@ -570,6 +570,10 @@ public class DisplayPolicy {
                         mService.mPowerManagerInternal.setPowerBoost(
                                 Boost.INTERACTION, duration);
                     }
+                    if (duration > 0) {
+                        com.android.server.axdragonite.AxDragoniteService.request(mDisplayContent,
+                                com.android.internal.dragonite.AxDragonite.FLING, 0, true);
+                    }
                 }
 
                 @Override

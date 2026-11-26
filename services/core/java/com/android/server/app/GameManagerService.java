@@ -405,6 +405,12 @@ public final class GameManagerService extends IGameManagerService.Stub {
                                 "Game loading power mode %s (game state change isLoading=%b)",
                                         isLoading ? "ON" : "OFF", isLoading));
                         mPowerManagerInternal.setPowerMode(Mode.GAME_LOADING, isLoading);
+                        if (uid >= 0) {
+                            com.android.server.axdragonite.AxDragoniteService.request(
+                                    packageName + ":" + userId,
+                                    com.android.internal.dragonite.AxDragonite.GAME_LOADING,
+                                    0, isLoading);
+                        }
                         if (isLoading) {
                             int loadingBoostDuration = getLoadingBoostDuration(packageName, userId);
                             loadingBoostDuration = loadingBoostDuration > 0 ? loadingBoostDuration

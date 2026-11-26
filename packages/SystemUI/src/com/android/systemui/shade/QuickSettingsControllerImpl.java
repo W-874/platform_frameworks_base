@@ -1099,6 +1099,13 @@ public class QuickSettingsControllerImpl implements QuickSettingsController, Dum
         mDepthController.setQsPanelExpansion(qsExpansionFraction);
         mStatusBarKeyguardViewManager.setQsExpansion(qsExpansionFraction);
         mShadeRepository.setQsExpansion(qsExpansionFraction);
+        if (qsExpansionFraction > 0f && qsExpansionFraction < 1f) {
+            com.android.internal.dragonite.AxDragonite.pulse(
+                    com.android.internal.dragonite.AxDragonite.QS);
+        } else {
+            com.android.internal.dragonite.AxDragonite.end(
+                    com.android.internal.dragonite.AxDragonite.QS);
+        }
 
         // TODO (b/265193930): remove dependency on NPVC
         float shadeExpandedFraction = mBarState == KEYGUARD

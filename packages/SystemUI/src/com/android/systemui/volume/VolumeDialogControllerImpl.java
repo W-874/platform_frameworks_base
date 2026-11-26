@@ -808,6 +808,8 @@ public class VolumeDialogControllerImpl implements VolumeDialogController, Dumpa
     }
 
     private void onShowRequestedW(int reason) {
+        com.android.internal.dragonite.AxDragonite.pulse(
+                com.android.internal.dragonite.AxDragonite.VOLUME);
         mCallbacks.onShowRequested(reason, mKeyguardManager.isKeyguardLocked(),
                 mActivityManager.getLockTaskModeState());
     }

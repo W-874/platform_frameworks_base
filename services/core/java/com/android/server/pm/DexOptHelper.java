@@ -284,6 +284,7 @@ public final class DexOptHelper {
         ArtManagerLocal artManager = new ArtManagerLocal(systemContext);
         artManager.addDexoptDoneCallback(false /* onlyIncludeUpdates */, Runnable::run,
                 pm.getDexOptHelper().new DexoptDoneHandler());
+        com.android.server.axdragonite.AxDexoptPolicy.register(systemContext, artManager);
         LocalManagerRegistry.addManager(ArtManagerLocal.class, artManager);
         sArtManagerLocalIsInitialized = true;
 

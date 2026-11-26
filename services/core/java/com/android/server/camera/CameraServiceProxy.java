@@ -1566,6 +1566,8 @@ public class CameraServiceProxy extends SystemService
             boolean wasEmpty = mActiveCameraUsage.isEmpty();
             switch (newCameraState) {
                 case CameraSessionStats.CAMERA_STATE_OPEN:
+                    com.android.server.axdragonite.AxDragoniteService.request(cameraId,
+                            com.android.internal.dragonite.AxDragonite.CAMERA_LAUNCH, 0, true);
                     // Notify the audio subsystem about the facing of the most-recently opened
                     // camera This can be used to select the best audio tuning in case video
                     // recording with that camera will happen.  Since only open events are used, if
@@ -1587,6 +1589,8 @@ public class CameraServiceProxy extends SystemService
                     mCameraEventHistory.add(openEvent);
                     break;
                 case CameraSessionStats.CAMERA_STATE_ACTIVE:
+                    com.android.server.axdragonite.AxDragoniteService.request(cameraId,
+                            com.android.internal.dragonite.AxDragonite.CAMERA_LAUNCH, 0, false);
                     // Check current active camera IDs to see if this package is already talking to
                     // some camera
                     boolean alreadyActivePackage = false;
@@ -1625,6 +1629,8 @@ public class CameraServiceProxy extends SystemService
                     break;
                 case CameraSessionStats.CAMERA_STATE_IDLE:
                 case CameraSessionStats.CAMERA_STATE_CLOSED:
+                    com.android.server.axdragonite.AxDragoniteService.request(cameraId,
+                            com.android.internal.dragonite.AxDragonite.CAMERA_LAUNCH, 0, false);
                     CameraUsageEvent doneEvent = mActiveCameraUsage.remove(cameraId);
                     if (doneEvent != null) {
 

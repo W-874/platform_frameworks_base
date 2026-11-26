@@ -1427,6 +1427,8 @@ public final class NotificationPanelViewController implements
             return;
         }
         mIsFlinging = true;
+        com.android.internal.dragonite.AxDragonite.pulse(
+                com.android.internal.dragonite.AxDragonite.SHADE_FLING);
         // we want to perform an overshoot animation when flinging open
         final boolean addOverscroll =
                 expand
@@ -1525,6 +1527,8 @@ public final class NotificationPanelViewController implements
     @VisibleForTesting
     void onFlingEnd(boolean cancelled) {
         mIsFlinging = false;
+        com.android.internal.dragonite.AxDragonite.end(
+                com.android.internal.dragonite.AxDragonite.SHADE_FLING);
         mExpectingSynthesizedDown = false;
         // No overshoot when the animation ends
         setOverExpansionInternal(0);

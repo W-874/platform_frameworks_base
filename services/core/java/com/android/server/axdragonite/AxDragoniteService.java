@@ -324,6 +324,8 @@ public final class AxDragoniteService {
         StringWriter state = new StringWriter();
         if (service.mWorker.runWithScissors(() -> service.dumpOnWorker(new PrintWriter(state)), 500)) {
             pw.print(state);
+            // Read kernel telemetry on the dump thread, outside the scene worker.
+            AxKernelMetrics.dump(pw);
         } else {
             pw.println("AxDragonite worker busy");
         }

@@ -120,6 +120,7 @@ import com.android.systemui.power.domain.interactor.powerInteractor
 import com.android.systemui.power.shared.model.WakeSleepReason
 import com.android.systemui.power.shared.model.WakefulnessState
 import com.android.systemui.scene.data.model.asIterable
+import com.android.systemui.scene.data.repository.ShowOverlay
 import com.android.systemui.scene.data.repository.Transition
 import com.android.systemui.scene.data.repository.setSceneTransition
 import com.android.systemui.scene.data.repository.unlockDevice
@@ -143,6 +144,7 @@ import com.android.systemui.statusbar.notificationLockscreenUserManager
 import com.android.systemui.statusbar.notificationShadeWindowController
 import com.android.systemui.statusbar.phone.BiometricUnlockController
 import com.android.systemui.statusbar.phone.centralSurfaces
+import com.android.systemui.statusbar.phone.screenOffAnimationController
 import com.android.systemui.statusbar.pipeline.mobile.data.repository.fakeMobileConnectionsRepository
 import com.android.systemui.statusbar.policy.data.repository.fakeDeviceProvisioningRepository
 import com.android.systemui.testKosmos
@@ -725,6 +727,72 @@ class SceneContainerStartableTest(flags: FlagsParameterization) : SysuiTestCase(
             powerInteractor.setAsleepForTest()
 
             assertThat(currentSceneKey).isEqualTo(Scenes.Lockscreen)
+        }
+
+    @Test
+    fun dozing_programmaticSceneChangesDoNotWakeDevice() =
+        kosmos.runTest {
+            startDozing()
+
+            setSceneTransition(
+                Transition(from = Scenes.Lockscreen, to = Scenes.Occluded),
+                skipChangeScene = true,
+            )
+            assertThat(fakePowerRepository.lastWakeReason).isNull()
+
+            setSceneTransition(
+                ObservableTransitionState.Idle(Scenes.Occluded),
+                skipChangeScene = true,
+            )
+            assertThat(fakePowerRepository.lastWakeReason).isNull()
+
+            setSceneTransition(
+                Transition(from = Scenes.Occluded, to = Scenes.Lockscreen),
+                skipChangeScene = true,
+            )
+            assertThat(fakePowerRepository.lastWakeReason).isNull()
+        }
+
+    @Test
+    fun dozing_userSwipeFromLockscreenToShadeWakesDevice() =
+        kosmos.runTest {
+            startDozing()
+
+            setSceneTransition(
+                Transition(
+                    from = Scenes.Lockscreen,
+                    to = Scenes.Shade,
+                    isInitiatedByUserInput = true,
+                    isUserInputOngoing = flowOf(true),
+                ),
+                skipChangeScene = true,
+            )
+
+            assertThat(fakePowerRepository.lastWakeReason).isEqualTo(PowerManager.WAKE_REASON_GESTURE)
+        }
+
+    @Test
+    fun dozing_onlyUserSwipeToBouncerWakesDevice() =
+        kosmos.runTest {
+            startDozing()
+
+            setSceneTransition(
+                ShowOverlay(overlay = Overlays.Bouncer, fromScene = Scenes.Lockscreen),
+                skipChangeScene = true,
+            )
+            assertThat(fakePowerRepository.lastWakeReason).isNull()
+
+            setSceneTransition(
+                ShowOverlay(
+                    overlay = Overlays.Bouncer,
+                    fromScene = Scenes.Lockscreen,
+                    // The gesture has ended but its transition is still settling.
+                    isInitiatedByUserInput = true,
+                ),
+                skipChangeScene = true,
+            )
+
+            assertThat(fakePowerRepository.lastWakeReason).isEqualTo(PowerManager.WAKE_REASON_GESTURE)
         }
 
     @Test
@@ -3472,6 +3540,14 @@ class SceneContainerStartableTest(flags: FlagsParameterization) : SysuiTestCase(
         )
         runCurrent()
         verifyAfterTransition?.invoke()
+    }
+
+    private fun Kosmos.startDozing() {
+        prepareState(startsAwake = false, isInteractive = false)
+        whenever(screenOffAnimationController.allowWakeUpIfDozing()).thenReturn(true)
+        underTest.start()
+        runCurrent()
+        statusBarStateController.setIsDozing(true)
     }
 
     private fun Kosmos.prepareState(

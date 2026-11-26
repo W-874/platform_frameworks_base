@@ -1163,25 +1163,20 @@ constructor(
     }
 
     /**
-     * Wake up the device if we're dozing and no longer displaying the lockscreen Scene. This
-     * includes both Scene and Overlay transitions.
+     * Wake from dozing when a gesture leaves the lockscreen, including swipes that open overlays.
+     * Programmatic scene changes and their final idle states must not wake the device.
      */
     private fun wakeFromDozingOnContentChange() {
         applicationScope.launch {
-            launch {
-                sceneInteractor.transitionStateFlow
-                    .filter {
-                        it.isTransitioning(from = Scenes.Lockscreen) ||
-                            !it.isIdle(Scenes.Lockscreen)
-                    }
-                    .distinctUntilChanged()
-                    .collect {
-                        powerInteractor.wakeUpIfDozing(
-                            "Wake-up from dozing. Transitioning away from Scenes.Lockscreen",
-                            PowerManager.WAKE_REASON_GESTURE,
-                        )
-                    }
-            }
+            sceneInteractor.transitionStateFlow
+                .filterIsInstance<ObservableTransitionState.Transition>()
+                .filter { it.isInitiatedByUserInput && it.fromContent == Scenes.Lockscreen }
+                .collect {
+                    powerInteractor.wakeUpIfDozing(
+                        "Wake-up from dozing. Transitioning away from Scenes.Lockscreen",
+                        PowerManager.WAKE_REASON_GESTURE,
+                    )
+                }
         }
     }
 

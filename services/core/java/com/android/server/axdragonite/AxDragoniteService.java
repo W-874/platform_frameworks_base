@@ -172,6 +172,7 @@ public final class AxDragoniteService {
         long now = SystemClock.uptimeMillis();
         long nextExpiry = Long.MAX_VALUE;
         long until = 0;
+        long gpuUntil = 0;
         int level = AxKernelManager.NONE;
         mUiPids.clear();
         for (int i = mLeases.size() - 1; i >= 0; i--) {
@@ -188,6 +189,9 @@ public final class AxDragoniteService {
                 until = lease.expires;
             } else if (leaseLevel == level) {
                 until = Math.max(until, lease.expires);
+            }
+            if (lease.policy.boostRendering()) {
+                gpuUntil = Math.max(gpuUntil, lease.expires);
             }
             if (mAffinity && mKernel.performanceMask != 0 && lease.policy.placeUi()
                     && lease.pid > 0 && lease.pid != Process.myPid()) {
@@ -214,7 +218,7 @@ public final class AxDragoniteService {
                 placement.stopRealtime();
             }
         }
-        mKernel.apply(level, until);
+        mKernel.apply(level, until, gpuUntil);
         Trace.traceCounter(Trace.TRACE_TAG_POWER, "AxDragonite level", level);
         Trace.traceCounter(Trace.TRACE_TAG_POWER, "AxDragonite leases", mLeases.size());
         mWorker.removeCallbacks(mExpire);
@@ -240,7 +244,8 @@ public final class AxDragoniteService {
         for (int i = 0; i < mLeases.size(); i++) {
             Lease lease = mLeases.valueAt(i);
             pw.println("  scene=" + lease.key.scene() + " pid=" + lease.pid
-                    + " level=" + lease.policy.level() + " expiresUptime=" + lease.expires);
+                    + " level=" + lease.policy.level() + " rendering=" + lease.policy.boostRendering()
+                    + " expiresUptime=" + lease.expires);
         }
     }
 }

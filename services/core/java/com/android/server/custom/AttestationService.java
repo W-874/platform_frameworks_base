@@ -29,6 +29,7 @@ import com.android.internal.security.keybox.KeyboxKeyParameters;
 import android.system.keystore2.KeyDescriptor;
 
 import com.android.internal.util.custom.CustomUtils;
+import com.android.internal.util.custom.KeyProviderManager;
 import com.android.internal.util.custom.KeyboxChainGenerator;
 import com.android.internal.util.custom.KeyboxChainGenerator.KeyGenParameters;
 import com.android.internal.util.custom.KeyboxUtils;
@@ -231,6 +232,9 @@ public final class AttestationService extends SystemService {
         @Override
         public boolean shouldUseKeybox(int targetUid) {
             enforcePermission();
+            if (!KeyProviderManager.isKeyboxAvailable()) {
+                return false;
+            }
             Context userContext = mContext.createContextAsUser(
                     UserHandle.of(UserHandle.getUserId(targetUid)), 0);
             String excluded = Settings.Secure.getString(

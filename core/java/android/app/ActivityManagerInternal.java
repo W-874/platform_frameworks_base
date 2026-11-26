@@ -376,6 +376,15 @@ public abstract class ActivityManagerInternal {
     /** Kill the processes in the list due to their tasks been removed. */
     public abstract void killProcessesForRemovedTask(ArrayList<Object> procsToKill);
 
+    /** System-server notification that the focused activity changed. */
+    public abstract void onAxTopActivity(ApplicationInfo info, boolean home);
+
+    /** System-server notification that a task was removed. */
+    public abstract void onAxTaskRemoved(int uid, String packageName);
+
+    /** Reclaim background memory from the permission-checked keyguard face-auth path. */
+    public abstract void onAxFaceAuthentication();
+
     /** Kill the process immediately. */
     public abstract void killProcess(String processName, int uid, String reason);
 

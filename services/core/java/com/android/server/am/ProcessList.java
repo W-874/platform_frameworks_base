@@ -3016,6 +3016,9 @@ public final class ProcessList extends ProcessListInternal
             app.setUsingWrapper(usingWrapper);
             app.setPendingStart(false);
         }
+        if (app.getHostingRecord().isTopApp() && app.getHostingRecord().isTypeActivity()) {
+            mService.mAxMemory.onActivityProcessStart(app.info);
+        }
         checkSlow(app.getStartTime(), "startProcess: starting to update pids map");
         ProcessRecord oldApp;
         synchronized (mService.mPidsSelfLocked) {

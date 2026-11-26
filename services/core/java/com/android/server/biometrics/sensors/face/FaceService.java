@@ -285,6 +285,12 @@ public class FaceService extends SystemService {
             }
             options.setSensorId(provider.first);
 
+            if (isKeyguard) {
+                final var am = com.android.server.LocalServices.getService(
+                        android.app.ActivityManagerInternal.class);
+                if (am != null) am.onAxFaceAuthentication();
+            }
+
             return provider.second.scheduleAuthenticate(token, operationId,
                     0 /* cookie */, new ClientMonitorCallbackConverter(receiver), options,
                     restricted, statsClient, isKeyguard);

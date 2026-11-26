@@ -338,6 +338,8 @@ final class ActivityManagerShellCommand extends ShellCommand {
                     return runKill(pw);
                 case "kill-all":
                     return runKillAll(pw);
+                case "release-memory":
+                    return runReleaseMemory(pw);
                 case "make-uid-idle":
                     return runMakeIdle(pw);
                 case "set-deterministic-uid-idle":
@@ -2201,6 +2203,18 @@ final class ActivityManagerShellCommand extends ShellCommand {
 
     int runKillAll(PrintWriter pw) throws RemoteException {
         mInterface.killAllBackgroundProcesses();
+        return 0;
+    }
+
+    int runReleaseMemory(PrintWriter pw) {
+        final String adj = getNextArg();
+        final String count = getNextArg();
+        if (getNextArg() != null) {
+            getErrPrintWriter().println("Usage: release-memory [MIN_ADJ [MAX_COUNT]]");
+            return -1;
+        }
+        pw.println(mInternal.releaseAxMemoryFromShell(adj == null ? 0 : Integer.parseInt(adj),
+                count == null ? 0 : Integer.parseInt(count)) + " MiB estimated");
         return 0;
     }
 
@@ -5188,6 +5202,8 @@ final class ActivityManagerShellCommand extends ShellCommand {
             pw.println("      Kill all background processes associated with the given application.");
             pw.println("  kill-all");
             pw.println("      Kill all processes that are safe to kill (cached, etc).");
+            pw.println("  release-memory [MIN_ADJ [MAX_COUNT]]");
+            pw.println("      Reclaim background app memory; prints estimated RSS in MiB.");
             pw.println("  make-uid-idle [--user <USER_ID> | all | current] <PACKAGE>");
             pw.println("      If the given application's uid is in the background and waiting to");
             pw.println("      become idle (not allowing background services), do that now.");

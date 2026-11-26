@@ -2304,6 +2304,7 @@ public abstract class OomAdjuster {
     /** Applies the computed oomadj. */
     @GuardedBy({"mServiceLock", "mProcLock"})
     protected void applyOomAdjLSP(ProcessRecordInternal state, boolean isBatchingOomAdj) {
+        state.setCurAdj(state.applyMemoryPolicyAdj(state.getCurAdj()));
         final UidRecordInternal uidRec = state.getUidRecord();
 
         final boolean reportDebugMsgs = DEBUG_SWITCH || DEBUG_OOM_ADJ

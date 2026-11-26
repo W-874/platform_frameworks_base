@@ -742,6 +742,7 @@ public class ActivityManagerService extends IActivityManager.Stub
     @Nullable AppBackgroundModeController mAppBackgroundModeController;
     @Nullable AppBackgroundModeInternal mAppBackgroundModeInternal;
     OomAdjuster mOomAdjuster;
+    final AxMemoryManager mAxMemory = new AxMemoryManager(this);
     @GuardedBy("this")
     ProcessStateController mProcessStateController;
     /**
@@ -4400,6 +4401,91 @@ public class ActivityManagerService extends IActivityManager.Stub
             Binder.restoreCallingIdentity(callingId);
         }
     }
+
+    long releaseAxMemoryFromShell(int minAdj, int maxCount) {
+        mContext.enforceCallingPermission(android.Manifest.permission.KILL_ALL_BACKGROUND_PROCESSES,
+                "release-memory");
+        final long token = Binder.clearCallingIdentity();
+        try {
+            return mAxMemory.releaseExplicit(minAdj, maxCount);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    long releaseAxMemory(int minAdj, int count, boolean cachedActivities, boolean rankByRss,
+            String reason) {
+        long rssKb = 0;
+        synchronized (mGlobalLock) {
+            synchronized (mProcLock) {
+                final ProcessRecord top = getTopApp();
+                final var candidates = AxMemoryManager.rankVictims(
+                        mProcessList.getLruProcessesLOSP(), top, minAdj, cachedActivities, rankByRss);
+                final int currentUser = mUserController.getCurrentUserId();
+                for (ProcessRecord app : candidates) {
+                    if (app.userId != currentUser) continue;
+                    rssKb += Math.max(0, app.getLastRss());
+                    app.killLocked("ax memory: " + reason, ApplicationExitInfo.REASON_OTHER,
+                            ApplicationExitInfo.SUBREASON_MEMORY_PRESSURE, true);
+                    if (--count == 0) break;
+                }
+            }
+        }
+        return rssKb;
+    }
+
+    void startAxPrefork(ApplicationInfo requested) {
+        final var pm = getPackageManagerInternal();
+        final int user = UserHandle.getUserId(requested.uid);
+        final ApplicationInfo info = pm.getApplicationInfo(requested.packageName, 0, SYSTEM_UID,
+                user);
+        if (info == null || info.uid != requested.uid || !info.enabled || info.isInstantApp()
+                || (info.flags & (ApplicationInfo.FLAG_STOPPED | ApplicationInfo.FLAG_PERSISTENT))
+                        != 0 || !requested.processName.equals(info.processName)) return;
+        synchronized (mGlobalLock) {
+            synchronized (mProcLock) {
+                final ProcessRecord top = getTopApp();
+                if (user != mUserController.getCurrentUserId() || !mAxMemory.canPrefork(info)
+                        || mAppProfiler.getLastMemoryLevelLocked() != 0
+                        || (top != null && AxMemoryManager.isGame(top.info))
+                        || isAppBad(info.processName, info.uid)
+                        || getProcessRecordLocked(info.processName, info.uid) != null) return;
+            }
+            final ProcessRecord app = startProcessLocked(info.processName, info, false, 0,
+                    sNullHostingRecord, ZYGOTE_POLICY_FLAG_EMPTY, false, false);
+            if (app != null) {
+                synchronized (mProcLock) {
+                    mAxMemory.onPrefork(app);
+                }
+            }
+        }
+    }
+
+    void expireAxPrefork(ProcessRecord app, long startSeq) {
+        synchronized (mGlobalLock) {
+            synchronized (mProcLock) {
+                if (app.getStartSeq() != startSeq || !app.mAxPrefork) return;
+                mAxMemory.clearPrefork(app);
+                if (getProcessRecordLocked(app.processName, app.uid) == app && app.getPid() > 0
+                        && !app.hasActivities() && !app.getHasStartedServices()
+                        && !app.mReceivers.isReceivingBroadcast()
+                        && app.getProcState() == ActivityManager.PROCESS_STATE_CACHED_EMPTY
+                        && app.getSetProcState() == ActivityManager.PROCESS_STATE_CACHED_EMPTY) {
+                    app.killLocked("ax prefork expired", ApplicationExitInfo.REASON_OTHER,
+                            ApplicationExitInfo.SUBREASON_TRIM_EMPTY, true);
+                } else {
+                    updateOomAdjLocked(app, OOM_ADJ_REASON_UI_VISIBILITY);
+                }
+            }
+        }
+    }
+
+    void updateAxMemoryOomAdj() {
+        synchronized (mGlobalLock) {
+            updateOomAdjLocked(OOM_ADJ_REASON_UI_VISIBILITY);
+        }
+    }
+
 
     /**
      * Kills all background processes, except those matching any of the
@@ -9716,6 +9802,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
             mMemoryLimiter.onSystemReady();
             mSystemReady = true;
+            mAxMemory.systemReady();
             t.traceEnd();
         }
 
@@ -14341,6 +14428,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             boolean fromBinderDied) {
         boolean restart;
         synchronized (mProcLock) {
+            mAxMemory.onDeath(app);
             if (index >= 0) {
                 removeLruProcessLocked(app);
                 ProcessList.remove(pid);
@@ -18079,6 +18167,21 @@ public class ActivityManagerService extends IActivityManager.Stub
         public boolean isUserRunning(int userId, int flags) {
             // Holding am lock isn't required to call into user controller.
             return mUserController.isUserRunning(userId, flags);
+        }
+
+        @Override
+        public void onAxTopActivity(ApplicationInfo info, boolean home) {
+            mAxMemory.onTopActivity(info, home);
+        }
+
+        @Override
+        public void onAxTaskRemoved(int uid, String packageName) {
+            mAxMemory.onTaskRemoved(uid, packageName);
+        }
+
+        @Override
+        public void onAxFaceAuthentication() {
+            mAxMemory.onFaceAuthentication();
         }
 
         @Override

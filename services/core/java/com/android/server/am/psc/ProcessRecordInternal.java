@@ -136,6 +136,11 @@ public abstract class ProcessRecordInternal {
     /** Retrieves the last reported RSS (Resident Set Size) for this process. */
     public abstract long getLastRss();
 
+    /** Applies platform memory retention policy to the final OOM score. */
+    public int applyMemoryPolicyAdj(int adj) {
+        return adj;
+    }
+
     /**
      * Checks if a specific compatibility change is enabled for the process.
      *

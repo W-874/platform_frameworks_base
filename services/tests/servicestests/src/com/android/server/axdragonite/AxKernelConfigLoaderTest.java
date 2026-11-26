@@ -5,11 +5,10 @@ package com.android.server.axdragonite;
 
 import static org.junit.Assert.assertEquals;
 
-import android.util.Xml;
-
 import org.junit.Test;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
+import org.xmlpull.v1.XmlPullParserFactory;
 
 import java.io.StringReader;
 import java.util.List;
@@ -68,7 +67,7 @@ public class AxKernelConfigLoaderTest {
     }
 
     private static List<String> parse(String xml) throws Exception {
-        XmlPullParser parser = Xml.newPullParser();
+        XmlPullParser parser = XmlPullParserFactory.newInstance().newPullParser();
         parser.setInput(new StringReader(xml));
         return AxKernelConfigLoader.readPlacementPolicies(parser);
     }

@@ -8,6 +8,7 @@ import android.os.Environment;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.SystemClock;
 import android.util.Slog;
 import android.util.SparseArray;
 import android.util.Xml;
@@ -20,7 +21,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.util.Arrays;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -34,23 +34,20 @@ final class AxKernelManager {
     static final int HEAVY = 2;
     private static final String TAG = "AxKernelManager";
     private static final String HAL_SERVICE = "android.hardware.power.IPower/default";
-    private static final String[] HINTS = {null, "AX_DRAGONITE_LIGHT", "AX_DRAGONITE_HEAVY"};
 
     record Scene(int level, int durationMs, boolean placeUi) {}
 
     final SparseArray<Scene> scenes = new SparseArray<>();
-    private final int[] mPolicyIds;
+    private final AxPowerVote mVote = new AxPowerVote(SystemClock::uptimeMillis);
     final long performanceMask;
-    private IPowerExt mHal;
-    private int mLevel;
-    private long mUntil;
+    private AxPowerVote.Boost mBoost;
+
     static boolean isConfigured() {
         return POLICY_FILE.isFile();
     }
 
-    private AxKernelManager(int[] policyIds) {
-        mPolicyIds = policyIds;
-        performanceMask = detectPerformanceMask(policyIds);
+    private AxKernelManager(long performanceMask) {
+        this.performanceMask = performanceMask;
     }
 
     static AxKernelManager load() throws IOException, XmlPullParserException {
@@ -59,9 +56,7 @@ final class AxKernelManager {
             XmlPullParser parser = Xml.newPullParser();
             parser.setInput(input, null);
             XmlUtils.beginDocument(parser, "dragonite");
-            int[] policyIds = Arrays.stream(parser.getAttributeValue(null, "cpuPolicies")
-                    .split(",")).mapToInt(Integer::parseInt).toArray();
-            AxKernelManager manager = new AxKernelManager(policyIds);
+            AxKernelManager manager = new AxKernelManager(AxKernelConfigLoader.loadPlacementMask());
             final int depth = parser.getDepth();
             while (XmlUtils.nextElementWithin(parser, depth)) {
                 if (!"scene".equals(parser.getName())) {
@@ -85,69 +80,28 @@ final class AxKernelManager {
         }
     }
 
-    private static long detectPerformanceMask(int[] policyIds) {
-        int bestCapacity = 0;
-        long mask = 0;
-        try {
-            for (int policyId : policyIds) {
-                String cpus = readLine("/sys/devices/system/cpu/cpufreq/policy" + policyId
-                        + "/related_cpus");
-                long policyMask = 0;
-                for (String id : cpus.split("\\s+")) {
-                    int cpu = Integer.parseInt(id);
-                    if (cpu < 0 || cpu >= Long.SIZE) return 0;
-                    policyMask |= 1L << cpu;
-                }
-                int capacity = Integer.parseInt(readLine("/sys/devices/system/cpu/cpu" + policyId
-                        + "/cpu_capacity"));
-                if (capacity > bestCapacity) {
-                    bestCapacity = capacity;
-                    mask = policyMask;
-                } else if (capacity == bestCapacity) {
-                    mask |= policyMask;
-                }
-            }
-        } catch (IOException | NumberFormatException e) {
-            Slog.w(TAG, "CPU topology unavailable; leaving thread placement to Android", e);
-            return 0;
-        }
-        return mask;
-    }
-
-    private static String readLine(String path) throws IOException {
-        try (FileInputStream input = new FileInputStream(path)) {
-            return new String(input.readNBytes(256), java.nio.charset.StandardCharsets.US_ASCII)
-                    .trim();
-        }
-    }
-
     // Called on the Dragonite worker only. libperfmgr remains the sole shared node writer.
-    void apply(int level, long until, long now) {
-        if (level == NONE && mLevel == NONE) return;
-        if (mHal != null && level == mLevel && mUntil == until) return;
+    void apply(int level, long until) {
+        if (level == NONE && mVote.level() == NONE) return;
         try {
-            if (mHal == null) {
+            boolean reconnect = mBoost == null;
+            if (reconnect) {
                 IBinder binder = ServiceManager.checkService(HAL_SERVICE);
                 if (binder == null) return;
-                mHal = IPowerExt.Stub.asInterface(binder.getExtension());
-                if (mHal == null) return;
+                IPowerExt hal = IPowerExt.Stub.asInterface(binder.getExtension());
+                if (hal == null) return;
+                mBoost = hal::setBoost;
             }
-            if (level != NONE) {
-                mHal.setBoost(HINTS[level], (int) Math.max(1, until - now));
-            }
-            if (level != mLevel && mLevel != NONE) mHal.setBoost(HINTS[mLevel], -1);
-            mLevel = level;
-            mUntil = until;
+            mVote.apply(mBoost, level, until, reconnect);
         } catch (RemoteException e) {
-            mHal = null;
+            mBoost = null;
             Slog.w(TAG, "Power HAL extension unavailable", e);
         }
     }
 
     void dump(PrintWriter pw) {
-        pw.println("  policies=" + Arrays.toString(mPolicyIds)
-                + " performanceMask=0x" + Long.toHexString(performanceMask));
-        pw.println("  hint=" + HINTS[mLevel] + " expiresUptime=" + mUntil
-                + " halConnected=" + (mHal != null));
+        pw.println("  performanceMask=0x" + Long.toHexString(performanceMask));
+        pw.println("  hint=" + mVote.hint() + " expiresUptime=" + mVote.until()
+                + " halConnected=" + (mBoost != null));
     }
 }

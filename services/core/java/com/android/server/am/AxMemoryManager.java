@@ -39,6 +39,7 @@ import dalvik.system.VMRuntime;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -207,7 +208,7 @@ final class AxMemoryManager {
             }
         }
         if (mAm.mUserController.getCurrentUserId() == user) {
-            final Ranking ranking = new Ranking(user, Map.copyOf(ranks));
+            final Ranking ranking = new Ranking(user, snapshotRanks(ranks));
             mRanking = ranking;
             mAm.mHandler.post(mAm::updateAxMemoryOomAdj);
             final long uptime = SystemClock.uptimeMillis();
@@ -224,6 +225,11 @@ final class AxMemoryManager {
             }
         }
         scheduleRefresh(AxMemoryPolicy.LMK_WINDOW_MS);
+    }
+
+    static <K, V> Map<K, V> snapshotRanks(ArrayMap<K, V> ranks) {
+        // Map.copyOf calls entrySet().toArray(), which ArrayMap does not support.
+        return Collections.unmodifiableMap(new ArrayMap<>(ranks));
     }
 
     boolean canPrefork(ApplicationInfo info) {

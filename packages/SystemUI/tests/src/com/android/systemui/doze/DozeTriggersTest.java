@@ -52,7 +52,6 @@ import com.android.systemui.broadcast.BroadcastDispatcher;
 import com.android.systemui.dock.DockManager;
 import com.android.systemui.doze.DozeTriggers.DozingUpdateUiEvent;
 import com.android.systemui.log.SessionTracker;
-import com.android.systemui.res.R;
 import com.android.systemui.settings.UserTracker;
 import com.android.systemui.statusbar.phone.DozeParameters;
 import com.android.systemui.statusbar.policy.DevicePostureController;
@@ -152,7 +151,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         mProximitySensor = new FakeProximitySensor(thresholdSensor,  null, mExecutor);
 
         mTriggers = new DozeTriggers(mContext, mHost, config, dozeParameters,
-                asyncSensorManager, wakeLock, mDockManager, mProximitySensor,
+                asyncSensorManager, mSensors, wakeLock, mDockManager, mProximitySensor,
                 mProximityCheck, mDozeLog, mBroadcastDispatcher, new FakeSettings(),
                 mAuthController, mUiEventLogger, mSessionTracker, mKeyguardStateController,
                 mDevicePostureController, mUserTracker, mSelectedUserInteractor, mExecutor, mClock);
@@ -359,7 +358,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE_PULSING);
 
         // WHEN quick pick up is triggered
-        mTriggers.onSensor(DozeLog.REASON_SENSOR_QUICK_PICKUP, 100, 100, null);
+        mTriggers.onSensor(DozeLog.REASON_SENSOR_QUICK_PICKUP, true, 100, 100, null);
 
         // THEN don't request pulse
         verify(mMachine, never()).requestPulse(anyInt());
@@ -371,7 +370,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE_PULSING_WITHOUT_UI);
 
         // WHEN quick pick up is triggered
-        mTriggers.onSensor(DozeLog.REASON_SENSOR_QUICK_PICKUP, 100, 100, null);
+        mTriggers.onSensor(DozeLog.REASON_SENSOR_QUICK_PICKUP, true, 100, 100, null);
 
         // THEN don't request pulse
         verify(mMachine, never()).requestPulse(anyInt());
@@ -383,7 +382,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE_PULSING_AUTH_UI);
 
         // WHEN udpfs longpress is triggered
-        mTriggers.onSensor(DozeLog.REASON_SENSOR_QUICK_PICKUP, 100, 100, null);
+        mTriggers.onSensor(DozeLog.REASON_SENSOR_QUICK_PICKUP, true, 100, 100, null);
 
         // THEN don't request pulse
         verify(mMachine, never()).requestPulse(anyInt());
@@ -395,7 +394,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE);
 
         // WHEN udfps longpress up is triggered
-        mTriggers.onSensor(DozeLog.REASON_SENSOR_UDFPS_LONG_PRESS, 100, 100, null);
+        mTriggers.onSensor(DozeLog.REASON_SENSOR_UDFPS_LONG_PRESS, true, 100, 100, null);
 
         // THEN request pulse
         verify(mMachine).requestPulse(DozeLog.REASON_SENSOR_UDFPS_LONG_PRESS);
@@ -407,7 +406,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE_PULSING_WITHOUT_UI);
 
         // WHEN udpfs longpress is triggered
-        mTriggers.onSensor(DozeLog.PULSE_REASON_SENSOR_LONG_PRESS, 100, 100, null);
+        mTriggers.onSensor(DozeLog.PULSE_REASON_SENSOR_LONG_PRESS, true, 100, 100, null);
 
         // THEN don't request pulse
         verify(mMachine, never()).requestPulse(anyInt());
@@ -419,7 +418,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE_PULSING_AUTH_UI);
 
         // WHEN udpfs longpress is triggered
-        mTriggers.onSensor(DozeLog.PULSE_REASON_SENSOR_LONG_PRESS, 100, 100, null);
+        mTriggers.onSensor(DozeLog.PULSE_REASON_SENSOR_LONG_PRESS, true, 100, 100, null);
 
         // THEN don't request pulse
         verify(mMachine, never()).requestPulse(anyInt());
@@ -431,7 +430,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE_PULSING);
 
         // WHEN quick pick up is triggered
-        mTriggers.onSensor(DozeLog.PULSE_REASON_SENSOR_LONG_PRESS, 100, 100, null);
+        mTriggers.onSensor(DozeLog.PULSE_REASON_SENSOR_LONG_PRESS, true, 100, 100, null);
 
         // THEN don't request pulse
         verify(mMachine, never()).requestPulse(anyInt());
@@ -560,85 +559,31 @@ public class DozeTriggersTest extends SysuiTestCase {
     }
 
     @Test
-    public void pickupTilt_stationarySamplesDoNotWakeAndNextLiftCanWake() throws Exception {
-        enablePickupTiltCheck();
-        triggerPickupForTiltCheck();
-        sendAccelerationFor(460, 0.03f, -0.11f, 9.56f);
-        mExecutor.advanceClockToNext();
-        verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
-        verify(mDozeLog).traceSensorEventDropped(
-                DozeLog.REASON_SENSOR_PICKUP, "pickup motion not confirmed");
-
-        triggerPickupForTiltCheck();
-        sendLevelLift();
-        verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
-        mExecutor.advanceClockToNext();
-        verify(mMachine).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
-    }
-
-    @Test
-    public void pickupTilt_recurringMotionBacksOffWithoutSamplingAgain() throws Exception {
-        enablePickupTiltCheck();
-        triggerPickupForTiltCheck();
-        sendAccelerationFor(60, 0f, 0f, 11.0f);
-        sendAccelerationFor(60, 0f, 0f, 8.5f);
-        sendAccelerationFor(60, 0f, 0f, 11.0f);
-        waitForSensorManager();
-        verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
-
-        clearInvocations(mSensors);
-        mClock.advanceTime(600);
-        triggerPickupForTiltCheck();
-        verify(mSensors, never()).registerListener(any(), eq(mSensors.getFakeAccelerometer()
-                .getSensor()), anyInt(), anyInt(), any());
-
-        mClock.advanceTime(600);
-        triggerPickupForTiltCheck();
-        sendLevelLift();
-        mExecutor.advanceClockToNext();
-        verify(mMachine).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
-    }
-
-    @Test
-    public void pickupTilt_ignoresLateSamplesAfterDozeFinishes() throws Exception {
-        enablePickupTiltCheck();
-        triggerPickupForTiltCheck();
-        sendAccelerationFor(60, 0f, 0f, 11.0f);
-        mTriggers.transitionTo(DozeMachine.State.DOZE, DozeMachine.State.FINISH);
-        waitForSensorManager();
-
-        sendLevelLift();
-        mExecutor.advanceClockToNext();
-        verify(mMachine, never()).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
-        verify(mDozeLog, never()).traceSensorEventDropped(
-                DozeLog.REASON_SENSOR_PICKUP, "pickup motion not confirmed");
-    }
-
-    private void enablePickupTiltCheck() throws Exception {
-        mContext.getOrCreateTestableResources().addOverride(R.bool.doze_pickup_require_tilt, true);
+    public void confirmedPickupUsesSelectedDisplayPolicy() {
+        when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE);
         when(mConfig.enabled(anyInt())).thenReturn(true);
         when(mConfig.pickupGestureEnabled(anyInt())).thenReturn(true);
-        setupDozeTriggers(mConfig, DozeConfigurationUtil.createMockParameters());
+        when(mConfig.pickupGestureAmbient(anyInt())).thenReturn(true);
+        mTriggers.onPickupConfirmed();
+        verify(mMachine).requestPulse(DozeLog.REASON_SENSOR_PICKUP);
+        verify(mMachine, never()).wakeUp(anyInt());
+
+        when(mConfig.pickupGestureAmbient(anyInt())).thenReturn(false);
+        mTriggers.onPickupConfirmed();
+        verify(mMachine).wakeUp(DozeLog.REASON_SENSOR_PICKUP);
+    }
+
+    @Test
+    public void confirmationAfterOptOutOrFinishDoesNotWake() {
         when(mMachine.getState()).thenReturn(DozeMachine.State.DOZE);
-    }
-
-    private void triggerPickupForTiltCheck() {
-        mTriggers.onSensor(DozeLog.REASON_SENSOR_PICKUP, true, -1, -1, null);
-        waitForSensorManager();
-    }
-
-    private void sendLevelLift() {
-        sendAccelerationFor(60, 0f, 0f, 11.0f);
-        sendAccelerationFor(60, 0f, 0f, 8.5f);
-        sendAccelerationFor(340, 0f, 0.5f, 9.8f);
-    }
-
-    private void sendAccelerationFor(int durationMs, float x, float y, float z) {
-        for (int elapsedMs = 0; elapsedMs < durationMs; elapsedMs += 20) {
-            mSensors.getFakeAccelerometer().sendSensorEventAt(mClock.elapsedRealtimeNanos(),
-                    x, y, z);
-            mClock.advanceTime(20);
-        }
+        when(mConfig.enabled(anyInt())).thenReturn(true);
+        when(mConfig.pickupGestureEnabled(anyInt())).thenReturn(false);
+        mTriggers.onPickupConfirmed();
+        when(mConfig.pickupGestureEnabled(anyInt())).thenReturn(true);
+        when(mMachine.getState()).thenReturn(DozeMachine.State.FINISH);
+        mTriggers.onPickupConfirmed();
+        verify(mMachine, never()).wakeUp(anyInt());
+        verify(mMachine, never()).requestPulse(anyInt());
     }
 
     @Test
@@ -719,7 +664,7 @@ public class DozeTriggersTest extends SysuiTestCase {
         when(mHost.isPulsePending()).thenReturn(false);
         when(mMachine.isExecutingTransition()).thenReturn(true);
 
-        mTriggers.onSensor(DozeLog.REASON_SENSOR_UDFPS_LONG_PRESS, 100, 100, null);
+        mTriggers.onSensor(DozeLog.REASON_SENSOR_UDFPS_LONG_PRESS, true, 100, 100, null);
 
         // THEN pulse is dropped
         verify(mDozeLog).tracePulseDropped(anyString(), eq(null));

@@ -195,8 +195,12 @@
     <!-- Doze: should the significant motion sensor be used as a pulse signal? -->
     <bool name="doze_pulse_on_significant_motion">false</bool>
 
-    <!-- Doze: require a short accelerometer check to reject pickup events while flat. -->
-    <bool name="doze_pickup_require_tilt">false</bool>
+    <!-- Enable only on products with a verified motion candidate and non-wake IMU. -->
+    <bool name="doze_pickup_motion_history">false</bool>
+    <integer name="doze_pickup_history_hz">25</integer>
+    <integer name="doze_pickup_batch_ms">2000</integer>
+    <integer name="doze_pickup_tilt_degrees">13</integer>
+    <integer name="doze_pickup_acceleration_mm_s2">750</integer>
 
     <!-- Doze: check proximity sensor before pulsing? -->
     <bool name="doze_proximity_check_before_pulse">true</bool>

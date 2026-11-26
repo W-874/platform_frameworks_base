@@ -112,6 +112,8 @@ public class DozeSensors {
 
     // Sensor callbacks
     private final Callback mSensorCallback; // receives callbacks on registered sensor events
+    @android.annotation.Nullable private final DozePickupTiltCheck mPickupMotion;
+    private boolean mPickupDozeState;
     private final Consumer<Boolean> mProxCallback; // receives callbacks on near/far updates
 
     private final Handler mHandler = new Handler();
@@ -160,7 +162,8 @@ public class DozeSensors {
             SecureSettings secureSettings,
             AuthController authController,
             DevicePostureController devicePostureController,
-            SelectedUserInteractor selectedUserInteractor
+            SelectedUserInteractor selectedUserInteractor,
+            @android.annotation.Nullable DozePickupTiltCheck pickupMotion
     ) {
         mSensorManager = sensorManager;
         mConfig = config;
@@ -168,6 +171,7 @@ public class DozeSensors {
         mProxCallback = proxCallback;
         mSecureSettings = secureSettings;
         mSensorCallback = sensorCallback;
+        mPickupMotion = pickupMotion;
         mDozeLog = dozeLog;
         mProximitySensor = proximitySensor;
         mProximitySensor.setTag(TAG);
@@ -471,6 +475,20 @@ public class DozeSensors {
         for (TriggerSensor s : mTriggerSensors) {
             s.updateListening();
         }
+        updatePickupHistory();
+    }
+
+    void setPickupDozeState(boolean eligible) {
+        mPickupDozeState = eligible;
+        updatePickupHistory();
+    }
+
+    private void updatePickupHistory() {
+        if (mPickupMotion != null) {
+            int user = mSelectedUserInteractor.getSelectedUserId();
+            mPickupMotion.setListening(mPickupDozeState && mConfig.enabled(user)
+                    && mConfig.pickupGestureEnabled(user));
+        }
     }
 
     void onScreenState(int state) {
@@ -501,6 +519,7 @@ public class DozeSensors {
             for (TriggerSensor s : mTriggerSensors) {
                 s.updateListening();
             }
+            updatePickupHistory();
         }
     };
 
@@ -838,6 +857,8 @@ public class DozeSensors {
         @AnyThread
         public void onTrigger(TriggerEvent event) {
             final Sensor sensor = mSensors[mPosture];
+            final long eventNs = event.timestamp;
+            final long receivedNs = SystemClock.elapsedRealtimeNanos();
             mDozeLog.traceSensor(mPulseReason);
             mHandler.post(mWakeLock.wrap(() -> {
                 if (sensor != null && sensor.getType() == Sensor.TYPE_PICK_UP_GESTURE) {
@@ -851,8 +872,12 @@ public class DozeSensors {
                     screenX = event.values[0];
                     screenY = event.values[1];
                 }
-                mSensorCallback.onSensorPulse(mPulseReason, mPerformsProxCheck,
-                        screenX, screenY, event.values);
+                if (mPickupMotion != null && mPulseReason == DozeLog.REASON_SENSOR_PICKUP) {
+                    mPickupMotion.candidate(eventNs, receivedNs);
+                } else {
+                    mSensorCallback.onSensorPulse(mPulseReason, mPerformsProxCheck,
+                            screenX, screenY, event.values);
+                }
                 if (!mRegistered && mImmediatelyReRegister) {
                     updateListening();
                 }

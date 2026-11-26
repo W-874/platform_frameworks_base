@@ -29,6 +29,19 @@ public class AxKernelConfigLoaderTest {
     }
 
     @Test
+    public void selectsNamedGameWorkerPolicyIndependentlyOfUi() throws Exception {
+        XmlPullParser parser = XmlPullParserFactory.newInstance().newPullParser();
+        parser.setInput(new StringReader("""
+                <kernel-manager>
+                    <cpu id="little" path="%s" gameWorkerPlacement="true" />
+                    <cpu id="big" path="%s" uiPlacement="true" />
+                </kernel-manager>
+                """.formatted(POLICY0, POLICY4)));
+        assertEquals(List.of(POLICY0),
+                AxKernelConfigLoader.readPlacementPolicies(parser, "gameWorkerPlacement"));
+    }
+
+    @Test
     public void upstreamNodeAttributeTakesPrecedenceOverPath() throws Exception {
         assertEquals(List.of(POLICY4), parse("""
                 <kernel-manager>
@@ -69,6 +82,6 @@ public class AxKernelConfigLoaderTest {
     private static List<String> parse(String xml) throws Exception {
         XmlPullParser parser = XmlPullParserFactory.newInstance().newPullParser();
         parser.setInput(new StringReader(xml));
-        return AxKernelConfigLoader.readPlacementPolicies(parser);
+        return AxKernelConfigLoader.readPlacementPolicies(parser, "uiPlacement");
     }
 }

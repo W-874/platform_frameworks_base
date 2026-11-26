@@ -35,6 +35,7 @@ final class AxKernelManager {
     private static final String HAL_SERVICE = "android.hardware.power.IPower/default";
     private static final String[] CPU_HINTS = {null, "AX_DRAGONITE_LIGHT", "AX_DRAGONITE_HEAVY"};
     private static final String GPU_RENDERING_HINT = "AX_DRAGONITE_GPU_RENDERING";
+    private static final String CAMERA_CPUSET_HINT = "AX_DRAGONITE_CAMERA_CPUSET";
     static final String GOVERNOR = "ax_dragonite_cpu_governor";
     static final String CPU_PROFILE = "ax_dragonite_cpu_profile";
     static final String GPU_PROFILE = "ax_dragonite_gpu_profile";
@@ -50,14 +51,19 @@ final class AxKernelManager {
         static final File FILE = new File(Environment.getProductDirectory(), "etc/ax_dragonite.xml");
     }
 
-    record Scene(int level, int durationMs, boolean placeUi, boolean boostRendering) {}
+    record Scene(int level, int durationMs, boolean placeUi, boolean boostRendering,
+            boolean placeGameThreads, boolean limitCameraCpuset) {}
 
     final SparseArray<Scene> scenes = new SparseArray<>();
     private final AxPowerVote mCpuVote = new AxPowerVote(SystemClock::uptimeMillis);
     private final AxPowerVote mGpuVote = new AxPowerVote(SystemClock::uptimeMillis);
+    private final AxPowerVote mCameraVote = new AxPowerVote(SystemClock::uptimeMillis);
     final long performanceMask;
+    final long gameWorkerMask;
     private boolean mHasRenderingScenes;
     private boolean mRenderingSupported;
+    private boolean mHasCameraScenes;
+    private boolean mCameraSupported;
     private IPowerExt mHal;
     private AxPowerVote.Boost mBoost;
     private IBinder.DeathRecipient mDeathRecipient;
@@ -83,14 +89,16 @@ final class AxKernelManager {
         mHal = null;
         mBoost = null;
         mRenderingSupported = false;
+        mCameraSupported = false;
     }
 
     static boolean isConfigured() {
         return ProductPolicy.FILE.isFile();
     }
 
-    private AxKernelManager(long performanceMask) {
+    private AxKernelManager(long performanceMask, long gameWorkerMask) {
         this.performanceMask = performanceMask;
+        this.gameWorkerMask = gameWorkerMask;
     }
 
     static AxKernelManager load() throws IOException, XmlPullParserException {
@@ -98,14 +106,15 @@ final class AxKernelManager {
         try (FileInputStream input = new FileInputStream(ProductPolicy.FILE)) {
             XmlPullParser parser = Xml.newPullParser();
             parser.setInput(input, null);
-            return parse(parser, AxKernelConfigLoader.loadPlacementMask());
+            return parse(parser, AxKernelConfigLoader.loadPlacementMask("uiPlacement"),
+                    AxKernelConfigLoader.loadPlacementMask("gameWorkerPlacement"));
         }
     }
 
-    private static AxKernelManager parse(XmlPullParser parser, long performanceMask)
-            throws IOException, XmlPullParserException {
+    private static AxKernelManager parse(XmlPullParser parser, long performanceMask,
+            long gameWorkerMask) throws IOException, XmlPullParserException {
         XmlUtils.beginDocument(parser, "dragonite");
-        AxKernelManager manager = new AxKernelManager(performanceMask);
+        AxKernelManager manager = new AxKernelManager(performanceMask, gameWorkerMask);
         final int depth = parser.getDepth();
         while (XmlUtils.nextElementWithin(parser, depth)) {
             if (!"scene".equals(parser.getName())) {
@@ -117,6 +126,7 @@ final class AxKernelManager {
             }
             Scene scene = parseScene(parser, id);
             manager.mHasRenderingScenes |= scene.boostRendering();
+            manager.mHasCameraScenes |= scene.limitCameraCpuset();
             manager.scenes.put(id, scene);
         }
         return manager;
@@ -137,11 +147,13 @@ final class AxKernelManager {
             throw new XmlPullParserException("Invalid GPU profile for scene " + id);
         }
         return new Scene(level, duration,
-                Boolean.parseBoolean(parser.getAttributeValue(null, "placeUi")), gpuProfile != null);
+                Boolean.parseBoolean(parser.getAttributeValue(null, "placeUi")), gpuProfile != null,
+                Boolean.parseBoolean(parser.getAttributeValue(null, "placeGameThreads")),
+                Boolean.parseBoolean(parser.getAttributeValue(null, "limitCameraCpuset")));
     }
 
     // Called on the Dragonite worker only. libperfmgr remains the sole shared node writer.
-    boolean apply(int level, long until, long gpuUntil,
+    boolean apply(int level, long until, long gpuUntil, long cameraUntil,
             Consumer<IBinder> onHalDied) {
         try {
             boolean reconnect = mHal == null;
@@ -155,6 +167,7 @@ final class AxKernelManager {
                     if (hal.isModeSupported(MODES[i])) supported |= 1 << i;
                 }
                 boolean rendering = mHasRenderingScenes && hal.isBoostSupported(GPU_RENDERING_HINT);
+                boolean camera = mHasCameraScenes && hal.isBoostSupported(CAMERA_CPUSET_HINT);
                 IBinder extension = hal.asBinder();
                 IBinder.DeathRecipient recipient = () -> onHalDied.accept(extension);
                 extension.linkToDeath(recipient, 0);
@@ -163,6 +176,7 @@ final class AxKernelManager {
                 mDeathRecipient = recipient;
                 mSupportedModes = supported;
                 mRenderingSupported = rendering;
+                mCameraSupported = camera;
             }
             final int requested = mRequestedModes & mSupportedModes;
             final int previous = reconnect ? mSupportedModes & ~requested : mActiveModes;
@@ -184,6 +198,9 @@ final class AxKernelManager {
             mGpuVote.apply(mBoost,
                     mRenderingSupported && gpuUntil != 0 ? GPU_RENDERING_HINT : null,
                     gpuUntil, reconnect);
+            mCameraVote.apply(mBoost,
+                    mCameraSupported && cameraUntil != 0 ? CAMERA_CPUSET_HINT : null,
+                    cameraUntil, reconnect);
             return true;
         } catch (RemoteException e) {
             Slog.w(TAG, "Power HAL extension unavailable", e);

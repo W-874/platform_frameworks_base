@@ -7,13 +7,14 @@ package com.android.server.axdragonite;
 import android.os.Process;
 import android.os.SystemClock;
 import android.util.Slog;
+import android.util.SparseArray;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Arrays;
 
-/** Scope a Dragonite affinity request to the main and named render threads of one UI process. */
+/** Save and restore affinity for one process's selected threads. */
 final class AxUiPlacement {
     private static final String TAG = "AxDragonitePlacement";
     private static final int DISCOVERY_INTERVAL_MS = 200;
@@ -27,6 +28,8 @@ final class AxUiPlacement {
     private final int mPid;
     private final long mMask;
     private final long mStartTime;
+    private final long mGameWorkerMask;
+    private final SparseArray<Placement> mGameThreads;
     private boolean mMainAttempted;
     private long mLastDiscovery = -DISCOVERY_INTERVAL_MS;
     private Placement mMain;
@@ -37,16 +40,75 @@ final class AxUiPlacement {
     private FairBoost mRenderBoost;
 
     AxUiPlacement(int pid, long mask) {
+        this(pid, mask, 0, startTime(pid, pid));
+    }
+
+    AxUiPlacement(int pid, long mask, long gameWorkerMask, long startTime) {
         mPid = pid;
         mMask = mask;
-        mStartTime = startTime(pid);
+        mStartTime = startTime;
+        mGameWorkerMask = gameWorkerMask;
+        mGameThreads = gameWorkerMask == 0 ? null : new SparseArray<>();
+    }
+
+    boolean isGamePlacement() {
+        return mGameThreads != null;
+    }
+
+    boolean isGameProcess(long startTime) {
+        return isGamePlacement() && mStartTime == startTime;
+    }
+
+    long refreshGame(long now) {
+        if (mStartTime != startTime(mPid)) return Long.MAX_VALUE;
+        if (now - mLastDiscovery < DISCOVERY_INTERVAL_MS) {
+            return mLastDiscovery + DISCOVERY_INTERVAL_MS;
+        }
+        mLastDiscovery = now;
+        // Render and worker threads can be created after loading starts or recycle their TIDs.
+        for (int i = mGameThreads.size() - 1; i >= 0; i--) {
+            Placement thread = mGameThreads.valueAt(i);
+            if (thread.startTime() != startTime(thread.tid())) mGameThreads.removeAt(i);
+        }
+        File[] tasks = new File("/proc/" + mPid + "/task").listFiles();
+        if (tasks != null) {
+            for (File task : tasks) {
+                try {
+                    int tid = Integer.parseInt(task.getName());
+                    if (tid == mPid || mGameThreads.indexOfKey(tid) >= 0) continue;
+                    int role = gameThreadRole(Files.readString(new File(task, "comm").toPath())
+                            .trim());
+                    if (role == 0) continue;
+                    Placement thread = place(tid, role == 1 ? mMask : mGameWorkerMask);
+                    if (thread != null) mGameThreads.put(tid, thread);
+                } catch (IOException | NumberFormatException ignored) {
+                    // A thread can exit during discovery.
+                }
+            }
+        }
+        if (mMain == null && mGameThreads.size() != 0) mMain = place(mPid, mMask);
+        return now + DISCOVERY_INTERVAL_MS;
+    }
+
+    static int gameThreadRole(String comm) {
+        if (startsWith(comm, "RenderThread") || startsWith(comm, "UnityMain")
+                || startsWith(comm, "UnityGfx") || startsWith(comm, "RHIThread")
+                || startsWith(comm, "GLThread") || startsWith(comm, "GameThread")
+                || startsWith(comm, "MainThread") || startsWith(comm, "Godot")) return 1;
+        if (startsWith(comm, "Job.Worker") || startsWith(comm, "TaskGraph")
+                || "Thread".equals(comm)) return 2;
+        return 0;
+    }
+
+    private static boolean startsWith(String comm, String prefix) {
+        return comm.regionMatches(true, 0, prefix, 0, prefix.length());
     }
 
     void refresh() {
         if (mStartTime < 0 || mStartTime != startTime(mPid)) return;
         if (!mMainAttempted) {
             mMainAttempted = true;
-            mMain = place(mPid);
+            mMain = place(mPid, mMask);
         }
         if (mRender != null) return;
         long now = SystemClock.uptimeMillis();
@@ -59,7 +121,7 @@ final class AxUiPlacement {
                 int tid = Integer.parseInt(task.getName());
                 if (tid == mPid || !"RenderThread".equals(
                         Files.readString(new File(task, "comm").toPath()).trim())) continue;
-                mRender = place(tid);
+                mRender = place(tid, mMask);
                 break;
             } catch (IOException | NumberFormatException ignored) {
                 // A thread can exit between listFiles and the read.
@@ -146,17 +208,20 @@ final class AxUiPlacement {
         stopRealtime();
         stopFairBoost();
         if (mStartTime < 0 || mStartTime != startTime(mPid)) return;
+        if (mGameThreads != null) {
+            for (int i = mGameThreads.size() - 1; i >= 0; i--) restore(mGameThreads.valueAt(i));
+        }
         restore(mRender);
         restore(mMain);
     }
 
-    private Placement place(int tid) {
+    private Placement place(int tid, long mask) {
         long start = startTime(tid);
         if (start < 0) return null;
         try {
             long[] affinity = Process.getSchedAffinity(tid);
             if (affinity.length == 0) return null;
-            long selected = affinity[0] & mMask;
+            long selected = affinity[0] & mask;
             if (selected == 0) return null;
             if (selected == affinity[0] && affinity.length == 1) {
                 return new Placement(tid, start, null, selected);
@@ -186,8 +251,12 @@ final class AxUiPlacement {
     }
 
     private long startTime(int tid) {
+        return startTime(mPid, tid);
+    }
+
+    static long startTime(int pid, int tid) {
         try {
-            String stat = Files.readString(new File("/proc/" + mPid + "/task/" + tid + "/stat")
+            String stat = Files.readString(new File("/proc/" + pid + "/task/" + tid + "/stat")
                     .toPath());
             String[] fields = stat.substring(stat.lastIndexOf(')') + 2).split(" +");
             return fields.length > 19 ? Long.parseLong(fields[19]) : -1;

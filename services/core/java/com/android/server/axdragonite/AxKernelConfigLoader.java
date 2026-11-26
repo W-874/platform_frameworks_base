@@ -29,13 +29,13 @@ final class AxKernelConfigLoader {
 
     private AxKernelConfigLoader() {}
 
-    static long loadPlacementMask() {
+    static long loadPlacementMask(String role) {
         File config = Environment.buildPath(Environment.getSystemExtDirectory(),
                 "etc", "ax_kernel_manager.xml");
         if (!config.isFile()) return 0;
         try (FileInputStream input = new FileInputStream(config)) {
             long mask = 0;
-            for (String path : readPlacementPolicies(Xml.resolvePullParser(input))) {
+            for (String path : readPlacementPolicies(Xml.resolvePullParser(input), role)) {
                 try (FileInputStream cpus = new FileInputStream(path + "/related_cpus")) {
                     mask |= parseRelatedCpus(new String(cpus.readNBytes(256),
                             StandardCharsets.US_ASCII));
@@ -48,14 +48,14 @@ final class AxKernelConfigLoader {
         }
     }
 
-    static List<String> readPlacementPolicies(XmlPullParser parser)
+    static List<String> readPlacementPolicies(XmlPullParser parser, String role)
             throws IOException, XmlPullParserException {
         XmlUtils.beginDocument(parser, "kernel-manager");
         List<String> policies = new ArrayList<>();
         final int depth = parser.getDepth();
         while (XmlUtils.nextElementWithin(parser, depth)) {
             if (!"cpu".equals(parser.getName())
-                    || !"true".equals(parser.getAttributeValue(null, "uiPlacement"))) continue;
+                    || !"true".equals(parser.getAttributeValue(null, role))) continue;
             // Axion prefers the node attribute but accepts path in device configurations.
             String node = parser.getAttributeValue(null, "node");
             if (node == null || node.isEmpty()) node = parser.getAttributeValue(null, "path");

@@ -98,6 +98,7 @@ import com.android.server.LocalServices;
 import com.android.server.ServiceThread;
 import com.android.server.SystemService;
 import com.android.server.SystemService.TargetUser;
+import com.android.server.axdragonite.AxDragoniteService;
 import com.android.server.utils.LazyJniRegistrar;
 import com.android.server.wm.ActivityTaskManagerInternal;
 import com.android.server.wm.CompatScaleProvider;
@@ -156,6 +157,8 @@ public final class GameManagerService extends IGameManagerService.Stub {
     private static final String USER_ID_MSG_KEY = "userId";
     private static final String GAME_MODE_INTERVENTION_LIST_FILE_NAME =
             "game_mode_intervention.list";
+
+    private record GameStateRequest(GameState state, AxDragoniteService.GameCaller caller) {}
 
     static {
         LazyJniRegistrar.registerGameManagerService();
@@ -372,7 +375,8 @@ public final class GameManagerService extends IGameManagerService.Stub {
                     break;
                 }
                 case SET_GAME_STATE: {
-                    final GameState gameState = (GameState) msg.obj;
+                    final GameStateRequest request = (GameStateRequest) msg.obj;
+                    final GameState gameState = request.state();
                     final boolean isLoading = gameState.isLoading();
                     final Bundle data = msg.getData();
                     final String packageName = data.getString(PACKAGE_NAME_MSG_KEY);
@@ -406,10 +410,8 @@ public final class GameManagerService extends IGameManagerService.Stub {
                                         isLoading ? "ON" : "OFF", isLoading));
                         mPowerManagerInternal.setPowerMode(Mode.GAME_LOADING, isLoading);
                         if (uid >= 0) {
-                            com.android.server.axdragonite.AxDragoniteService.request(
-                                    packageName + ":" + userId,
-                                    com.android.internal.dragonite.AxDragonite.GAME_LOADING,
-                                    0, isLoading);
+                            AxDragoniteService.requestGameLoading(packageName + ":" + userId,
+                                    uid, request.caller(), isLoading);
                         }
                         if (isLoading) {
                             int loadingBoostDuration = getLoadingBoostDuration(packageName, userId);
@@ -498,7 +500,8 @@ public final class GameManagerService extends IGameManagerService.Stub {
         data.putString(PACKAGE_NAME_MSG_KEY, packageName);
         data.putInt(USER_ID_MSG_KEY, userId);
         msg.setData(data);
-        msg.obj = gameState;
+        msg.obj = new GameStateRequest(gameState,
+                gameState.isLoading() ? AxDragoniteService.captureGameCaller() : null);
         mHandler.sendMessage(msg);
     }
 

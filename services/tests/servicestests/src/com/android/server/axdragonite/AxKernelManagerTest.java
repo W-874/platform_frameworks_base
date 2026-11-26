@@ -22,6 +22,8 @@ public class AxKernelManagerTest {
                 """);
         assertFalse(cpuOnly.boostRendering());
         assertFalse(cpuOnly.placeUi());
+        assertFalse(cpuOnly.limitCameraCpuset());
+        assertFalse(cpuOnly.placeGameThreads());
         assertEquals(AxKernelManager.HEAVY, cpuOnly.level());
         assertEquals(900, cpuOnly.durationMs());
 
@@ -32,6 +34,27 @@ public class AxKernelManagerTest {
         assertTrue(scene.placeUi());
         assertEquals(AxKernelManager.LIGHT, scene.level());
         assertEquals(320, scene.durationMs());
+    }
+
+    @Test
+    public void sceneOptInsDoNotEnableUiPlacementOrRendering() throws Exception {
+        AxKernelManager.Scene scene = parse("""
+                <scene level="heavy" durationMs="640" placeGameThreads="true"
+                       limitCameraCpuset="true" />
+                """);
+        assertTrue(scene.placeGameThreads());
+        assertTrue(scene.limitCameraCpuset());
+        assertFalse(scene.placeUi());
+        assertFalse(scene.boostRendering());
+    }
+
+    @Test
+    public void classifierDistinguishesGameRenderAndWorkerThreads() {
+        assertEquals(1, AxUiPlacement.gameThreadRole("unityGfxDeviceW"));
+        assertEquals(1, AxUiPlacement.gameThreadRole("RenderThread-1"));
+        assertEquals(2, AxUiPlacement.gameThreadRole("Job.Worker 0"));
+        assertEquals(2, AxUiPlacement.gameThreadRole("TaskGraphThread"));
+        assertEquals(0, AxUiPlacement.gameThreadRole("Binder:123_1"));
     }
 
     @Test(expected = XmlPullParserException.class)

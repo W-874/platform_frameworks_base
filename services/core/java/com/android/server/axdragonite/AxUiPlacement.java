@@ -31,7 +31,6 @@ final class AxUiPlacement {
     private final long mStartTime;
     private final long mGameWorkerMask;
     private final SparseArray<Placement> mGameThreads;
-    private boolean mMainAttempted;
     private long mLastDiscovery = -GAME_DISCOVERY_INTERVAL_MS;
     private Placement mMain;
     private Placement mRender;
@@ -113,29 +112,31 @@ final class AxUiPlacement {
         return comm.regionMatches(true, 0, prefix, 0, prefix.length());
     }
 
-    void refresh() {
-        if (mStartTime < 0 || mStartTime != startTime(mPid)) return;
-        if (!mMainAttempted) {
-            mMainAttempted = true;
-            mMain = place(mPid, mMask);
-        }
-        if (mRender != null) return;
-        long now = SystemClock.uptimeMillis();
-        if (now - mLastDiscovery < DISCOVERY_INTERVAL_MS) return;
+    long refresh(long now) {
+        if (mStartTime < 0 || mStartTime != startTime(mPid)) return Long.MAX_VALUE;
+        final long nextDiscovery = mLastDiscovery + DISCOVERY_INTERVAL_MS;
+        if (now < nextDiscovery) return nextDiscovery;
         mLastDiscovery = now;
+        if (mMain == null) mMain = place(mPid, mMask);
+        if (mRender != null && mRender.startTime() != startTime(mRender.tid())) {
+            stopFairBoost();
+            mRender = null;
+        }
+        if (mRender != null) return now + DISCOVERY_INTERVAL_MS;
         File[] tasks = new File("/proc/" + mPid + "/task").listFiles();
-        if (tasks == null) return;
+        if (tasks == null) return now + DISCOVERY_INTERVAL_MS;
         for (File task : tasks) {
             try {
                 int tid = Integer.parseInt(task.getName());
                 if (tid == mPid || !"RenderThread".equals(
                         Files.readString(new File(task, "comm").toPath()).trim())) continue;
                 mRender = place(tid, mMask);
-                break;
+                if (mRender != null) break;
             } catch (IOException | NumberFormatException ignored) {
                 // A thread can exit between listFiles and the read.
             }
         }
+        return now + DISCOVERY_INTERVAL_MS;
     }
 
     long reconcileRealtime(long now) {

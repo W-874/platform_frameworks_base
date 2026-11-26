@@ -8019,6 +8019,9 @@
     <!-- The package name of the allowlist provider service -->
     <string name="config_allowlistProviderServicePackage" />
 
+    <!-- Default for the privileged Axion memory policy override on this product. -->
+    <bool name="config_axMemoryPolicyEnabledByDefault">false</bool>
+
     <!-- Whether PersonalContextManagerService is enabled on this device -->
     <bool name="config_enablePersonalContextManagerService">false</bool>
 

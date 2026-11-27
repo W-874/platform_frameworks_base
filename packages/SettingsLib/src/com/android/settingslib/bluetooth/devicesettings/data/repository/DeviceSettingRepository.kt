@@ -36,6 +36,7 @@ import com.android.settingslib.bluetooth.devicesettings.DeviceSettingItem
 import com.android.settingslib.bluetooth.devicesettings.DeviceSettingPendingIntentAction
 import com.android.settingslib.bluetooth.devicesettings.DeviceSettingsConfig
 import com.android.settingslib.bluetooth.devicesettings.MultiTogglePreference
+import com.android.settingslib.bluetooth.devicesettings.DeviceSettingPreferenceState
 import com.android.settingslib.bluetooth.devicesettings.ToggleInfo
 import com.android.settingslib.bluetooth.devicesettings.shared.model.ButtonModel
 import com.android.settingslib.bluetooth.devicesettings.shared.model.DeviceSettingActionModel
@@ -53,8 +54,11 @@ import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
@@ -66,6 +70,10 @@ interface DeviceSettingRepository {
     suspend fun getDeviceSettingsConfig(
         cachedDevice: CachedBluetoothDevice
     ): DeviceSettingConfigModel?
+
+    /** Emits each resolved layout. A null result requests the platform's default layout. */
+    fun observeDeviceSettingsConfig(cachedDevice: CachedBluetoothDevice): Flow<DeviceSettingConfigModel?> =
+        flow { emit(getDeviceSettingsConfig(cachedDevice)) }
 
     /** Gets device setting for the bluetooth device. */
     fun getDeviceSetting(
@@ -103,27 +111,52 @@ class DeviceSettingRepositoryImpl(
         cachedDevice: CachedBluetoothDevice
     ): DeviceSettingConfigModel? {
         val endpoint = withContext(backgroundCoroutineContext) {
-            DeviceSettingServiceConnection.getConfigEndpoint(cachedDevice.device)
+            DeviceSettingServiceConnection.getConfigEndpoint(cachedDevice)
         } ?: return null
-        return connectionCache.get(ConnectionKey(cachedDevice, endpoint))
-            .getDeviceSettingsConfig()?.toModel()
+        return connectionCache.get(ConnectionKey(cachedDevice, endpoint.original)).let { connection ->
+            if (endpoint.allowsBtHelper) connection.observeConfigWithBtHelper().first()?.toModel()
+            else connection.getDeviceSettingsConfig()?.toModel()
+        }
     }
+
+    override fun observeDeviceSettingsConfig(
+        cachedDevice: CachedBluetoothDevice,
+    ): Flow<DeviceSettingConfigModel?> = observeConfigEndpoint(cachedDevice)
+        .flatMapLatest { endpoint ->
+            if (endpoint == null) {
+                flowOf(null)
+            } else {
+                val connection = connectionCache.get(ConnectionKey(cachedDevice, endpoint.original))
+                if (endpoint.allowsBtHelper) connection.observeConfigWithBtHelper()
+                else flow { emit(connection.getDeviceSettingsConfig()) }
+            }
+        }
+        .map { it?.toModel() }
+        .distinctUntilChanged()
+
+    private fun observeConfigEndpoint(cachedDevice: CachedBluetoothDevice) =
+        DeviceSettingServiceConnection.observeConfigEndpoint(
+            context, cachedDevice, backgroundCoroutineContext,
+        )
 
     override fun getDeviceSetting(
         cachedDevice: CachedBluetoothDevice,
         settingId: Int,
     ): Flow<DeviceSettingModel?> =
-        DeviceSettingServiceConnection.observeConfigEndpoint(
-            context,
-            cachedDevice.device,
-            backgroundCoroutineContext,
-        ).flatMapLatest { endpoint ->
+        observeConfigEndpoint(cachedDevice).flatMapLatest { endpoint ->
             if (endpoint == null) {
                 flowOf(null)
             } else {
-                val connection = connectionCache.get(ConnectionKey(cachedDevice, endpoint))
-                connection.getDeviceSetting(settingId)
-                    .map { it?.toModel(cachedDevice, connection) }
+                val connection = connectionCache.get(ConnectionKey(cachedDevice, endpoint.original))
+                val settings = if (endpoint.allowsBtHelper) {
+                    connection.getDeviceSettingWithBtHelper(settingId)
+                } else {
+                    connection.getDeviceSetting(settingId)
+                }
+                val update: suspend (Int, DeviceSettingPreferenceState) -> Unit =
+                    if (endpoint.allowsBtHelper) connection::updateDeviceSettingsWithBtHelper
+                    else connection::updateDeviceSettings
+                settings.map { it?.toModel(cachedDevice, update) }
                     .onStart { emit(null) }
             }
         }
@@ -217,7 +250,7 @@ class DeviceSettingRepositoryImpl(
 
     private fun DeviceSetting.toModel(
         cachedDevice: CachedBluetoothDevice,
-        connection: DeviceSettingServiceConnection,
+        update: suspend (Int, DeviceSettingPreferenceState) -> Unit,
     ): DeviceSettingModel = when (val pref = preference) {
         is ActionSwitchPreference -> DeviceSettingModel.ActionSwitchPreference(
             cachedDevice = cachedDevice,
@@ -235,7 +268,7 @@ class DeviceSettingRepositoryImpl(
             updateState = pref.extras.getString(DeviceSettingContract.PREFERENCE_UPDATE_TOKEN).let { token ->
                 { newState: DeviceSettingStateModel.ActionSwitchPreferenceState ->
                     coroutineScope.launch(backgroundCoroutineContext) {
-                        connection.updateDeviceSettings(settingId, newState.toParcelable(token))
+                        update(settingId, newState.toParcelable(token))
                     }
                 }
             },
@@ -252,7 +285,7 @@ class DeviceSettingRepositoryImpl(
             updateState = pref.extras.getString(DeviceSettingContract.PREFERENCE_UPDATE_TOKEN).let { token ->
                 { newState: DeviceSettingStateModel.MultiTogglePreferenceState ->
                     coroutineScope.launch(backgroundCoroutineContext) {
-                        connection.updateDeviceSettings(settingId, newState.toParcelable(token))
+                        update(settingId, newState.toParcelable(token))
                     }
                 }
             },

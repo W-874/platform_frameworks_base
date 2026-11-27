@@ -23,6 +23,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
 import com.android.settingslib.bluetooth.CachedBluetoothDevice
@@ -74,8 +75,11 @@ import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.ArgumentMatchers.anyString
 import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mock
+import org.mockito.Mockito.doAnswer
 import org.mockito.Mockito.doReturn
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
+import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.junit.MockitoJUnit
@@ -91,6 +95,9 @@ class DeviceSettingRepositoryTest {
     @Mock private lateinit var bluetoothDevice: BluetoothDevice
     @Mock private lateinit var context: Context
     @Mock private lateinit var configService: IDeviceSettingsConfigProviderService.Stub
+    @Mock private lateinit var helperConfigService: IDeviceSettingsConfigProviderService.Stub
+    @Mock private lateinit var helperProviderService: IDeviceSettingsProviderService.Stub
+    @Mock private lateinit var packageManager: PackageManager
     @Mock private lateinit var settingProviderService1: IDeviceSettingsProviderService.Stub
     @Mock private lateinit var settingProviderService2: IDeviceSettingsProviderService.Stub
 
@@ -101,6 +108,7 @@ class DeviceSettingRepositoryTest {
     fun setUp() {
         `when`(cachedDevice.device).thenReturn(bluetoothDevice)
         `when`(cachedDevice.address).thenReturn(BLUETOOTH_ADDRESS)
+        `when`(context.mainExecutor).thenReturn(Executor { it.run() })
         `when`(
                 bluetoothDevice.getMetadata(
                     DeviceSettingServiceConnection.METADATA_FAST_PAIR_CUSTOMIZED_FIELDS
@@ -109,6 +117,8 @@ class DeviceSettingRepositoryTest {
             .thenReturn(BLUETOOTH_DEVICE_METADATA.toByteArray())
 
         `when`(configService.queryLocalInterface(anyString())).thenReturn(configService)
+        `when`(helperConfigService.queryLocalInterface(anyString())).thenReturn(helperConfigService)
+        `when`(helperProviderService.queryLocalInterface(anyString())).thenReturn(helperProviderService)
         `when`(settingProviderService1.queryLocalInterface(anyString()))
             .thenReturn(settingProviderService1)
         `when`(settingProviderService2.queryLocalInterface(anyString()))
@@ -124,6 +134,9 @@ class DeviceSettingRepositoryTest {
                         ComponentName(CONFIG_SERVICE_PACKAGE_NAME, CONFIG_SERVICE_CLASS_NAME),
                         configService,
                     )
+                GMS_CONFIG_ACTION -> connection.onServiceConnected(intent.component!!, configService)
+                HELPER_CONFIG_ACTION -> connection.onServiceConnected(intent.component!!, helperConfigService)
+                HELPER_PROVIDER_ACTION -> connection.onServiceConnected(intent.component!!, helperProviderService)
                 SETTING_PROVIDER_SERVICE_INTENT_ACTION_1 ->
                     connection.onServiceConnected(
                         ComponentName(
@@ -260,6 +273,103 @@ class DeviceSettingRepositoryTest {
 
             assertThat(config).isNull()
         }
+    }
+
+    @Test
+    fun markedGenericConfig_preservesSupportSlotsAndExposesHelperAnc() = testScope.runTest {
+        setUpCoexistence()
+        val config = underTest.getDeviceSettingsConfig(cachedDevice)!!
+        val ids = getItems(config.mainItems).map { it.settingId }
+        assertThat(ids.filter { it != DeviceSettingId.DEVICE_SETTING_ID_ANC })
+            .containsExactlyElementsIn(GMS_DEFAULT_IDS).inOrder()
+        assertThat(ids[ids.indexOf(6) + 1]).isEqualTo(DeviceSettingId.DEVICE_SETTING_ID_ANC)
+
+        var setting: DeviceSettingModel? = null
+        underTest.getDeviceSetting(cachedDevice, DeviceSettingId.DEVICE_SETTING_ID_ANC)
+            .onEach { setting = it }.launchIn(backgroundScope)
+        runCurrent()
+        assertDeviceSetting(setting!!, DEVICE_SETTING_2)
+        (setting as DeviceSettingModel.MultiTogglePreference).updateState(
+            DeviceSettingStateModel.MultiTogglePreferenceState(2)
+        )
+        runCurrent()
+        verify(helperProviderService).updateDeviceSettings(eq(DEVICE_INFO), any())
+    }
+
+    @Test
+    fun markedRicherGmsConfig_doesNotQueryHelper() = testScope.runTest {
+        setUpCoexistence()
+        val richer = GMS_DEFAULT_CONFIG.copy(
+            mainContentItems = GMS_DEFAULT_CONFIG.mainContentItems + DEVICE_SETTING_APP_PROVIDED_ITEM_2,
+        )
+        setUpConfigService(true, richer)
+        setUpProviderService(settingProviderService2, true, listOf(DEVICE_SETTING_2))
+        assertConfig(underTest.getDeviceSettingsConfig(cachedDevice)!!, richer)
+        verify(helperConfigService, never()).getDeviceSettingsConfigWithOptions(any(), any(), any())
+    }
+
+    @Test
+    fun disabledHelperProvider_returnsOriginalConfig() = testScope.runTest {
+        setUpCoexistence()
+        setUpProviderService(helperProviderService, false, emptyList())
+        assertConfig(underTest.getDeviceSettingsConfig(cachedDevice)!!, GMS_DEFAULT_CONFIG)
+    }
+
+    @Test
+    fun rejectedHelperConfig_returnsOriginalConfig() = testScope.runTest {
+        setUpCoexistence()
+        setUpConfigService(false, null, helperConfigService)
+        assertConfig(underTest.getDeviceSettingsConfig(cachedDevice)!!, GMS_DEFAULT_CONFIG)
+    }
+
+    @Test
+    fun malformedMarker_doesNotQueryHelper() = testScope.runTest {
+        setUpCoexistence()
+        for (badMarker in listOf(MARKER + MARKER, MARKER.replace("1", "01"), MARKER.dropLast(1))) {
+            `when`(bluetoothDevice.getMetadata(METADATA_KEY))
+                .thenReturn((GMS_METADATA + badMarker).toByteArray())
+            assertConfig(underTest.getDeviceSettingsConfig(cachedDevice)!!, GMS_DEFAULT_CONFIG)
+        }
+        verify(helperConfigService, never()).getDeviceSettingsConfigWithOptions(any(), any(), any())
+    }
+
+    @Test
+    fun markedGenericConfig_observesLateMarkerAndDeviceDisconnect() = testScope.runTest {
+        setUpCoexistence()
+        val adapter = mock(BluetoothAdapter::class.java)
+        val manager = mock(BluetoothManager::class.java)
+        `when`(context.getSystemService(BluetoothManager::class.java)).thenReturn(manager)
+        `when`(manager.adapter).thenReturn(adapter)
+        val metadataListeners = mutableListOf<BluetoothAdapter.OnMetadataChangedListener>()
+        `when`(adapter.addOnMetadataChangedListener(any(), any(), any())).then { call ->
+            metadataListeners.add(call.getArgument(2))
+            true
+        }
+        var metadata = GMS_METADATA.toByteArray()
+        `when`(bluetoothDevice.getMetadata(METADATA_KEY)).then { metadata }
+        var config: DeviceSettingConfigModel? = null
+        var setting: DeviceSettingModel? = null
+        underTest.observeDeviceSettingsConfig(cachedDevice).onEach { config = it }.launchIn(backgroundScope)
+        underTest.getDeviceSetting(cachedDevice, DeviceSettingId.DEVICE_SETTING_ID_ANC)
+            .onEach { setting = it }.launchIn(backgroundScope)
+        runCurrent()
+        assertConfig(config!!, GMS_DEFAULT_CONFIG)
+        assertThat(setting).isNull()
+
+        metadata = (GMS_METADATA + MARKER).toByteArray()
+        metadataListeners.forEach { it.onMetadataChanged(bluetoothDevice, METADATA_KEY, metadata) }
+        runCurrent()
+        assertThat(getItems(config!!.mainItems).map { it.settingId })
+            .contains(DeviceSettingId.DEVICE_SETTING_ID_ANC)
+        assertDeviceSetting(setting!!, DEVICE_SETTING_2)
+
+        val callbacks = ArgumentCaptor.forClass(CachedBluetoothDevice.Callback::class.java)
+        verify(cachedDevice, times(2)).registerCallback(any(), callbacks.capture())
+        `when`(cachedDevice.isConnected).thenReturn(false)
+        callbacks.allValues.forEach { it.onDeviceAttributesChanged() }
+        runCurrent()
+        assertConfig(config!!, GMS_DEFAULT_CONFIG)
+        assertThat(setting).isNull()
     }
 
     @Test
@@ -552,35 +662,104 @@ class DeviceSettingRepositoryTest {
         assertThat(actual.settingId).isEqualTo(serviceResponse.settingId)
     }
 
-    private fun setUpConfigService(success: Boolean, config: DeviceSettingsConfig?) {
-        `when`(
-            configService.getDeviceSettingsConfigWithOptions(
-                any(),
-                any(),
-                any()
+    private fun setUpConfigService(
+        success: Boolean,
+        config: DeviceSettingsConfig?,
+        service: IDeviceSettingsConfigProviderService.Stub = configService,
+    ) {
+        doAnswer { input ->
+            input.getArgument<IGetDeviceSettingsConfigCallback>(1).onResult(
+                DeviceSettingsConfigServiceStatus(success = success),
+                config,
             )
-        ).then { input ->
-            input
-                .getArgument<IGetDeviceSettingsConfigCallback>(1)
-                .onResult(
-                    DeviceSettingsConfigServiceStatus(success = success),
-                    config
-                )
-        }
+            null
+        }.`when`(service).getDeviceSettingsConfigWithOptions(any(), any(), any())
+    }
+
+    private fun setUpCoexistence() {
+        `when`(bluetoothDevice.getMetadata(METADATA_KEY)).thenReturn((GMS_METADATA + MARKER).toByteArray())
+        `when`(bluetoothDevice.bondState).thenReturn(BluetoothDevice.BOND_BONDED)
+        `when`(cachedDevice.isConnected).thenReturn(true)
+        `when`(context.packageManager).thenReturn(packageManager)
+        `when`(packageManager.checkSignatures("android", HELPER_PACKAGE))
+            .thenReturn(PackageManager.SIGNATURE_MATCH)
+        setUpConfigService(true, GMS_DEFAULT_CONFIG)
+        setUpConfigService(true, HELPER_CONFIG, helperConfigService)
+        setUpProviderService(helperProviderService, true, listOf(DEVICE_SETTING_2))
     }
 
     private fun setUpProviderService(mockService: IDeviceSettingsProviderService.Stub, enabled: Boolean, settings: List<DeviceSetting>) {
-        `when`(mockService.registerDeviceSettingsListener(any(), any())).then {
-                input ->
-            input
-                .getArgument<IDeviceSettingsListener>(1)
-                .onDeviceSettingsChanged(settings)
-        }
+        doAnswer { input ->
+            input.getArgument<IDeviceSettingsListener>(1).onDeviceSettingsChanged(settings)
+            null
+        }.`when`(mockService).registerDeviceSettingsListener(any(), any())
         `when`(mockService.serviceStatus)
             .thenReturn(DeviceSettingsProviderServiceStatus(enabled))
     }
 
     private companion object {
+        const val METADATA_KEY = DeviceSettingServiceConnection.METADATA_FAST_PAIR_CUSTOMIZED_FIELDS
+        const val MARKER = "<BTHELPER_DEVICE_SETTINGS>1</BTHELPER_DEVICE_SETTINGS>"
+        const val GMS_CONFIG_ACTION = "com.google.android.gms.fastpair.ACTION_BIND_DEVICE_SETTINGS_CONFIG_PROVIDER"
+        const val GMS_METADATA =
+            "<DEVICE_SETTINGS_CONFIG_PACKAGE_NAME>com.google.android.gms</DEVICE_SETTINGS_CONFIG_PACKAGE_NAME>" +
+            "<DEVICE_SETTINGS_CONFIG_CLASS>com.google.android.gms.chimera.GmsBoundBrokerService</DEVICE_SETTINGS_CONFIG_CLASS>" +
+            "<DEVICE_SETTINGS_CONFIG_ACTION>$GMS_CONFIG_ACTION</DEVICE_SETTINGS_CONFIG_ACTION>"
+        const val HELPER_PACKAGE = "com.android.bluetooth.bthelper"
+        const val HELPER_CONFIG_ACTION = "$HELPER_PACKAGE.action.DEVICE_SETTINGS_CONFIG"
+        const val HELPER_PROVIDER_ACTION = "$HELPER_PACKAGE.action.DEVICE_SETTINGS_PROVIDER"
+        // Captured order and preference keys from the shipping Fast Pair AOSP config.
+        val GMS_DEFAULT_ITEMS = linkedMapOf(
+            4001 to null,
+            1 to "bluetooth_device_header",
+            22 to "general_bluetooth_device_header",
+            2 to "advanced_bluetooth_device_header",
+            3 to "le_audio_bluetooth_device_header",
+            4 to "hearing_aid_pair_other_button",
+            5 to "hearing_aid_space_layout",
+            6 to "action_buttons",
+            7 to "device_stylus",
+            23 to "audio_sharing_control",
+            9 to "bt_device_slice_category",
+            10 to "device_companion_apps",
+            11 to "hearing_device_group",
+            13 to "spatial_audio_group",
+            14 to "bluetooth_profiles",
+            12 to "bluetooth_audio_device_type_group",
+            15 to "bt_extra_options",
+            16 to "bluetooth_related_tools",
+            17 to "data_sync_group",
+            18 to "keyboard_settings",
+            24 to "game_controller_settings",
+            4002 to null,
+        )
+        val GMS_DEFAULT_IDS = GMS_DEFAULT_ITEMS.keys.toList()
+        val GMS_DEFAULT_CONFIG = DeviceSettingsConfig(
+            mainContentItems = GMS_DEFAULT_ITEMS.map { (id, key) ->
+                if (key == null) {
+                    DeviceSettingItem(
+                        id,
+                        packageName = "com.google.android.apps.pixel.support",
+                        intentAction = "com.google.android.apps.pixel.support.bluetooth.settingsprovider.BIND_SERVICE",
+                        isOptional = true,
+                    )
+                } else {
+                    DeviceSettingItem(id, preferenceKey = key)
+                }
+            },
+            moreSettingsItems = emptyList(),
+        )
+        val HELPER_CONFIG = DeviceSettingsConfig(
+            mainContentItems = listOf(
+                DeviceSettingItem(
+                    DeviceSettingId.DEVICE_SETTING_ID_ANC,
+                    packageName = HELPER_PACKAGE,
+                    className = "$HELPER_PACKAGE.BtHelperDeviceSettingsProviderService",
+                    intentAction = HELPER_PROVIDER_ACTION,
+                )
+            ),
+            moreSettingsItems = emptyList(),
+        )
         const val BLUETOOTH_ADDRESS = "12:34:56:78"
         const val CONFIG_SERVICE_PACKAGE_NAME = "com.android.fake.configservice"
         const val CONFIG_SERVICE_CLASS_NAME = "com.android.fake.configservice.Service"

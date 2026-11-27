@@ -19,10 +19,13 @@ package com.android.settingslib.bluetooth.devicesettings.data.repository
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.DeadObjectException
 import android.os.IBinder
@@ -46,6 +49,7 @@ import com.android.settingslib.bluetooth.devicesettings.IDeviceSettingsProviderS
 import com.android.settingslib.bluetooth.devicesettings.IGetDeviceSettingsConfigCallback
 import com.android.settingslib.bluetooth.devicesettings.data.model.ServiceConnectionStatus
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
@@ -57,6 +61,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -78,6 +83,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DeviceSettingServiceConnection(
@@ -111,6 +117,13 @@ class DeviceSettingServiceConnection(
             return isOptional
         }
     }
+
+    internal data class ConfigEndpoint(val original: EndPoint, val allowsBtHelper: Boolean)
+
+    private data class BtHelperConfig(
+        val supplement: BtHelperSupplement,
+        val service: IDeviceSettingsProviderService,
+    )
 
     private var isServiceEnabled =
         coroutineScope.async(backgroundCoroutineContext, start = CoroutineStart.LAZY) {
@@ -147,40 +160,107 @@ class DeviceSettingServiceConnection(
 
     private var config =
         coroutineScope.async(backgroundCoroutineContext, start = CoroutineStart.LAZY) {
-            val intent = configEndpoint.toIntent() ?: return@async null
-            getService(intent, IDeviceSettingsConfigProviderService.Stub::asInterface)
-                .flatMapConcat {
-                    when (it) {
-                        is ServiceConnectionStatus.Connected ->
-                            flowOf(
-                                getDeviceSettingsConfigFromService(
-                                        deviceInfo { setBluetoothAddress(cachedDevice.address) },
-                                        it.service,
-                                        DeviceSettingConfigOptions.Builder()
-                                            .setOptionalItemSupported(true)
-                                            .build(),
-                                    )
-                                    .also { config ->
-                                        Log.i(
-                                            TAG,
-                                            "device setting config for $cachedDevice is ${
-                                                config?.run {
-                                                    (mainContentItems + moreSettingsItems +
-                                                            listOfNotNull(
-                                                                moreSettingsHelpItem
-                                                            )).joinToString {
-                                                        item -> item.settingId.toString()
-                                                    }
-                                                } ?: "null"
-                                            }",
-                                        )
-                                    }
-                            )
-                        is ServiceConnectionStatus.Connecting -> flowOf()
-                        is ServiceConnectionStatus.Failed -> flowOf(null)
-                    }
+            queryConfig(configEndpoint)
+        }
+
+    private suspend fun queryConfig(endpoint: EndPoint): DeviceSettingsConfig? {
+        val intent = endpoint.toIntent() ?: return null
+        return getService(intent, IDeviceSettingsConfigProviderService.Stub::asInterface)
+            .flatMapConcat {
+                when (it) {
+                    is ServiceConnectionStatus.Connected ->
+                        flowOf(getDeviceSettingsConfigFromService(
+                            deviceInfo { setBluetoothAddress(cachedDevice.address) },
+                            it.service,
+                            DeviceSettingConfigOptions.Builder().setOptionalItemSupported(true).build(),
+                        ))
+                    is ServiceConnectionStatus.Connecting -> flowOf()
+                    is ServiceConnectionStatus.Failed -> flowOf(null)
                 }
-                .first()
+            }
+            .first()
+            .also { config ->
+                Log.i(TAG, "Device setting config from $intent for $cachedDevice: ${
+                    config?.run {
+                        (mainContentItems + moreSettingsItems + listOfNotNull(moreSettingsHelpItem))
+                            .map { it.settingId }
+                    }
+                }")
+            }
+    }
+
+    private val btHelperConfig = flow {
+        val original = readConfig()
+        if (original == null || !original.isGenericFastPairConfig()) {
+            emit(null)
+        } else {
+            emitAll(observeBtHelperPackage().flatMapLatest { observeBtHelperConfig(original) })
+        }
+    }.flowOn(backgroundCoroutineContext)
+        .shareIn(
+            coroutineScope,
+            SharingStarted.WhileSubscribed(replayExpirationMillis = 0),
+            replay = 1,
+        )
+
+    private fun observeBtHelperPackage(): Flow<Unit> = callbackFlow {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                trySend(Unit)
+            }
+        }
+        context.registerReceiver(
+            receiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_PACKAGE_ADDED)
+                addAction(Intent.ACTION_PACKAGE_REMOVED)
+                addAction(Intent.ACTION_PACKAGE_CHANGED)
+                addDataScheme("package")
+                addDataSchemeSpecificPart(BTHELPER_PACKAGE, android.os.PatternMatcher.PATTERN_LITERAL)
+            },
+            Context.RECEIVER_EXPORTED,
+        )
+        trySend(Unit)
+        awaitClose { context.unregisterReceiver(receiver) }
+    }
+
+    private fun observeBtHelperConfig(original: DeviceSettingsConfig): Flow<BtHelperConfig?> =
+        channelFlow {
+            val platformSigned = context.packageManager.checkSignatures("android", BTHELPER_PACKAGE) ==
+                PackageManager.SIGNATURE_MATCH
+            val supplement = if (platformSigned) {
+                withTimeoutOrNull(BTHELPER_TIMEOUT_MILLIS) { queryConfig(BTHELPER_CONFIG_ENDPOINT) }
+                    ?.let { original.withBtHelperControls(it) }
+            } else {
+                null
+            }
+            if (supplement == null) {
+                send(null)
+                return@channelFlow
+            }
+
+            val status = getService(
+                checkNotNull(BTHELPER_PROVIDER_ENDPOINT.toIntent()),
+                IDeviceSettingsProviderService.Stub::asInterface,
+            ).stateIn(this, SharingStarted.Eagerly, ServiceConnectionStatus.Connecting)
+            if (withTimeoutOrNull(BTHELPER_TIMEOUT_MILLIS) {
+                    status.first { it !is ServiceConnectionStatus.Connecting }
+                } == null) {
+                send(null)
+            }
+            status.collect {
+                val service = (it as? ServiceConnectionStatus.Connected)?.service
+                val enabled = try {
+                    service?.serviceStatus?.enabled == true
+                } catch (e: RemoteException) {
+                    Log.w(TAG, "Cannot read BtHelper provider status", e)
+                    false
+                } catch (e: RuntimeException) {
+                    Log.w(TAG, "BtHelper rejected provider status request", e)
+                    false
+                }
+                send(if (service != null && enabled) BtHelperConfig(supplement, service) else null)
+            }
         }
 
     private val services =
@@ -196,6 +276,10 @@ class DeviceSettingServiceConnection(
         service: IDeviceSettingsConfigProviderService,
         options: DeviceSettingConfigOptions,
     ): DeviceSettingsConfig? = suspendCancellableCoroutine { continuation ->
+        val responded = AtomicBoolean()
+        fun respond(config: DeviceSettingsConfig?) {
+            if (responded.compareAndSet(false, true)) continuation.resume(config)
+        }
         try {
             service.getDeviceSettingsConfigWithOptions(
                 deviceInfo,
@@ -204,23 +288,19 @@ class DeviceSettingServiceConnection(
                         status: DeviceSettingsConfigServiceStatus,
                         config: DeviceSettingsConfig?,
                     ) {
-                        if (!status.success) {
-                            continuation.resume(null)
-                        } else {
-                            continuation.resume(config)
-                        }
+                        respond(config.takeIf { status.success })
                     }
                 },
                 options,
             )
         } catch (e: RemoteException) {
             Log.i(TAG, "Fail to get config", e)
-            continuation.resume(null)
+            respond(null)
         } catch (e: RuntimeException) {
             // Binder rethrows provider-side runtime exceptions here. Escaping would fail the
             // config Deferred and cancel the caller-supplied scope.
             Log.w(TAG, "Provider rejected config request", e)
-            continuation.resume(null)
+            respond(null)
         }
     }
 
@@ -275,6 +355,43 @@ class DeviceSettingServiceConnection(
         // Wait until all settings providers are ready.
         waitUntilNonOptionalProviderReady()
         return readConfig()
+    }
+
+    internal fun observeConfigWithBtHelper(): Flow<DeviceSettingsConfig?> =
+        btHelperConfig.map { it?.supplement?.config ?: getDeviceSettingsConfig() }
+            .distinctUntilChanged()
+
+    internal fun getDeviceSettingWithBtHelper(settingId: Int): Flow<DeviceSetting?> =
+        btHelperConfig.flatMapLatest { helper ->
+            if (helper != null && settingId in helper.supplement.settingIds) {
+                getDeviceSettingsFromService(helper.service).map { settings ->
+                    settings.firstOrNull { it.settingId == settingId }
+                }.onStart { emit(null) }
+            } else {
+                getDeviceSetting(settingId)
+            }
+        }
+
+    internal suspend fun updateDeviceSettingsWithBtHelper(
+        settingId: Int,
+        state: DeviceSettingPreferenceState,
+    ) {
+        if (getConfigEndpoint(cachedDevice)?.allowsBtHelper != true) return
+        val helper = btHelperConfig.first()
+        if (helper != null && settingId in helper.supplement.settingIds) {
+            try {
+                helper.service.updateDeviceSettings(
+                    deviceInfo { setBluetoothAddress(cachedDevice.address) },
+                    DeviceSettingState.Builder().setSettingId(settingId).setPreferenceState(state).build(),
+                )
+            } catch (e: RemoteException) {
+                Log.w(TAG, "Cannot update BtHelper device setting", e)
+            } catch (e: SecurityException) {
+                Log.w(TAG, "BtHelper rejected device setting update", e)
+            }
+        } else {
+            updateDeviceSettings(settingId, state)
+        }
     }
 
     /** Gets the device settings with the ID for the device. */
@@ -432,27 +549,41 @@ class DeviceSettingServiceConnection(
                     object : ServiceConnection {
                         override fun onServiceConnected(name: ComponentName, service: IBinder) {
                             Log.i(TAG, "Service connected for $intent")
-                            launch { send(ServiceConnectionStatus.Connected(transform(service))) }
+                            trySend(ServiceConnectionStatus.Connected(transform(service)))
                         }
 
                         override fun onServiceDisconnected(name: ComponentName?) {
                             Log.i(TAG, "Service disconnected for $intent")
-                            launch { send(ServiceConnectionStatus.Connecting) }
+                            trySend(ServiceConnectionStatus.Connecting)
+                        }
+
+                        override fun onBindingDied(name: ComponentName) {
+                            trySend(ServiceConnectionStatus.Failed)
+                        }
+
+                        override fun onNullBinding(name: ComponentName) {
+                            trySend(ServiceConnectionStatus.Failed)
                         }
                     }
                 Log.i(TAG, "Try to bind service for $intent")
-                if (
-                    !context.bindService(
-                        intent,
-                        Context.BIND_AUTO_CREATE,
-                        { launch { it.run() } },
-                        serviceConnection,
-                    )
-                ) {
-                    Log.w(TAG, "Fail to bind service $intent")
-                    launch { send(ServiceConnectionStatus.Failed) }
+                try {
+                    if (!context.bindService(
+                            intent, Context.BIND_AUTO_CREATE, { launch { it.run() } }, serviceConnection,
+                        )) {
+                        Log.w(TAG, "Fail to bind service $intent")
+                        trySend(ServiceConnectionStatus.Failed)
+                    }
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "Cannot bind service $intent", e)
+                    trySend(ServiceConnectionStatus.Failed)
                 }
-                awaitClose { context.unbindService(serviceConnection) }
+                awaitClose {
+                    try {
+                        context.unbindService(serviceConnection)
+                    } catch (e: IllegalArgumentException) {
+                        // A rejected binding may never have been registered with this context.
+                    }
+                }
             }
             .flowOn(backgroundCoroutineContext)
     }
@@ -468,25 +599,52 @@ class DeviceSettingServiceConnection(
         const val CONFIG_SERVICE_INTENT_ACTION = "DEVICE_SETTINGS_CONFIG_ACTION"
         const val SERVICE_CONNECTION_STOP_MILLIS = 1000L
 
-        internal fun getConfigEndpoint(device: BluetoothDevice): EndPoint? {
-            val packageName = BluetoothUtils.getFastPairCustomizedField(
-                device, CONFIG_SERVICE_PACKAGE_NAME,
-            ) ?: return null
-            val className = BluetoothUtils.getFastPairCustomizedField(
-                device, CONFIG_SERVICE_CLASS_NAME,
-            ) ?: return null
-            val action = BluetoothUtils.getFastPairCustomizedField(
-                device, CONFIG_SERVICE_INTENT_ACTION,
-            ) ?: return null
-            return EndPoint(packageName, className, action, false)
+        private val GMS_CONFIG_ENDPOINT = EndPoint(
+            "com.google.android.gms",
+            "com.google.android.gms.chimera.GmsBoundBrokerService",
+            "com.google.android.gms.fastpair.ACTION_BIND_DEVICE_SETTINGS_CONFIG_PROVIDER",
+            false,
+        )
+        private val packageTag = ConfigTag(CONFIG_SERVICE_PACKAGE_NAME)
+        private val classTag = ConfigTag(CONFIG_SERVICE_CLASS_NAME)
+        private val actionTag = ConfigTag(CONFIG_SERVICE_INTENT_ACTION)
+        private val btHelperTag = ConfigTag("BTHELPER_DEVICE_SETTINGS")
+        private const val BTHELPER_TIMEOUT_MILLIS = 1000L
+
+        private class ConfigTag(name: String) {
+            private val start = "<$name>"
+            private val end = "</$name>"
+            private val pattern = Regex("$start(.*?)$end")
+
+            fun value(metadata: String): String? = pattern.find(metadata)?.groupValues?.get(1)
+
+            fun isUnique(metadata: String): Boolean =
+                metadata.indexOf(start) == metadata.lastIndexOf(start) &&
+                    metadata.indexOf(end) == metadata.lastIndexOf(end)
+        }
+
+        internal fun getConfigEndpoint(cachedDevice: CachedBluetoothDevice): ConfigEndpoint? {
+            val device = cachedDevice.device
+            val metadata = BluetoothUtils.getStringMetaData(device, METADATA_FAST_PAIR_CUSTOMIZED_FIELDS)
+                ?: return null
+            val packageName = packageTag.value(metadata) ?: return null
+            val className = classTag.value(metadata) ?: return null
+            val action = actionTag.value(metadata) ?: return null
+            val endpoint = EndPoint(packageName, className, action, false)
+            val allowsBtHelper = endpoint == GMS_CONFIG_ENDPOINT && btHelperTag.value(metadata) == "1" &&
+                btHelperTag.isUnique(metadata) && packageTag.isUnique(metadata) &&
+                classTag.isUnique(metadata) && actionTag.isUnique(metadata) &&
+                device.bondState == BluetoothDevice.BOND_BONDED && cachedDevice.isConnected
+            return ConfigEndpoint(endpoint, allowsBtHelper)
         }
 
         internal fun observeConfigEndpoint(
             context: Context,
-            device: BluetoothDevice,
+            cachedDevice: CachedBluetoothDevice,
             backgroundCoroutineContext: CoroutineContext,
-        ): Flow<EndPoint?> =
+        ): Flow<ConfigEndpoint?> =
             callbackFlow<Unit> {
+                val device = cachedDevice.device
                 val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
                 val listener = BluetoothAdapter.OnMetadataChangedListener { changed, key, _ ->
                     if (changed == device && key == METADATA_FAST_PAIR_CUSTOMIZED_FIELDS) {
@@ -496,14 +654,16 @@ class DeviceSettingServiceConnection(
                 val listening = adapter?.addOnMetadataChangedListener(
                     device, context.mainExecutor, listener,
                 ) == true
+                val deviceCallback = CachedBluetoothDevice.Callback { trySend(Unit) }
+                cachedDevice.registerCallback(context.mainExecutor, deviceCallback)
                 // Subscribe before reading so metadata published during setup isn't missed.
                 trySend(Unit)
-                if (!listening) close()
                 awaitClose {
                     if (listening) adapter?.removeOnMetadataChangedListener(device, listener)
+                    cachedDevice.unregisterCallback(deviceCallback)
                 }
             }
-                .map { getConfigEndpoint(device) }
+                .map { getConfigEndpoint(cachedDevice) }
                 .distinctUntilChanged()
                 .flowOn(backgroundCoroutineContext)
     }

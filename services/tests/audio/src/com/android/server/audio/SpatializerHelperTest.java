@@ -19,7 +19,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.content.Context;
@@ -49,6 +51,9 @@ import java.util.List;
 public class SpatializerHelperTest {
 
     private static final String TAG = "SpatializerHelperTest";
+
+    private static final AudioDeviceAttributes A2DP_DEVICE =
+            new AudioDeviceAttributes(AudioSystem.DEVICE_OUT_BLUETOOTH_A2DP, "00:11:22:33:44:55");
 
     // the actual class under test
     private SpatializerHelper mSpatHelper;
@@ -111,6 +116,52 @@ public class SpatializerHelperTest {
         List<AudioDeviceAttributes> compatDevices = mSpatHelper.getCompatibleAudioDevices();
         Assert.assertFalse(compatDevices.stream().anyMatch(dev -> dev.equalTypeAddress(dev2)));
         checkAddSettings();
+    }
+
+    @Test
+    public void refreshDeviceWithoutHeadTracker_skipsHeadTrackerRequest() {
+        addA2dpDeviceState();
+        SpatializerHelper helper = spy(mSpatHelper);
+
+        helper.refreshDevice(A2DP_DEVICE, /*initState=*/true);
+
+        Assert.assertTrue(helper.isAvailableForDevice(A2DP_DEVICE));
+        verify(helper, never()).setHeadTrackerEnabled(anyBoolean(), any());
+        verify(mSpyDeviceBroker, never()).postPersistAudioDeviceSettings();
+    }
+
+    @Test
+    public void refreshDeviceWithHeadTracker_preservesEnabledPreference() {
+        AdiDeviceState deviceState = addA2dpDeviceState();
+        deviceState.setHasHeadTracker(true);
+        deviceState.setHeadTrackerEnabled(true);
+
+        mSpatHelper.refreshDevice(A2DP_DEVICE, /*initState=*/true);
+
+        Assert.assertTrue(deviceState.isHeadTrackerEnabled());
+        verify(mSpyDeviceBroker, never()).postPersistAudioDeviceSettings();
+    }
+
+    @Test
+    public void setHeadTrackerEnabledWithoutHeadTracker_leavesPreferenceUnchanged() {
+        AdiDeviceState deviceState = addA2dpDeviceState();
+
+        mSpatHelper.setHeadTrackerEnabled(true, A2DP_DEVICE);
+        Assert.assertFalse(deviceState.isHeadTrackerEnabled());
+
+        deviceState.setHeadTrackerEnabled(true);
+        mSpatHelper.setHeadTrackerEnabled(false, A2DP_DEVICE);
+        Assert.assertTrue(deviceState.isHeadTrackerEnabled());
+        Assert.assertFalse(deviceState.hasHeadTracker());
+        verify(mSpyDeviceBroker, never()).postPersistAudioDeviceSettings();
+    }
+
+    private AdiDeviceState addA2dpDeviceState() {
+        mSpatHelper.initForTest(/*hasBinaural=*/true, /*hasTransaural=*/true);
+        AdiDeviceState deviceState = new AdiDeviceState(A2DP_DEVICE.getType(),
+                A2DP_DEVICE.getInternalType(), A2DP_DEVICE.getAddress());
+        mSpyDeviceBroker.addOrUpdateDeviceSAStateInInventory(deviceState, /*syncInventory=*/false);
+        return deviceState;
     }
 
     /**

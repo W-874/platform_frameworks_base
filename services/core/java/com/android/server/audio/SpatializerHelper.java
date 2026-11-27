@@ -598,7 +598,9 @@ public class SpatializerHelper {
                 : spatMode == Spatialization.Mode.TRANSAURAL
                         ? mTransauralEnabledDefault
                         : false);
-        device.setHeadTrackerEnabled(mHeadTrackingEnabledDefault);
+        if (!device.hasHeadTracker()) {
+            device.setHeadTrackerEnabled(mHeadTrackingEnabledDefault);
+        }
     }
 
     private static final String METRICS_DEVICE_PREFIX = "audio.spatializer.device.";
@@ -776,7 +778,9 @@ public class SpatializerHelper {
         final AdiDeviceState deviceState = findSACompatibleDeviceStateForAudioDeviceAttributes(ada);
         if (isAvailableForAdiDeviceState(deviceState)) {
             addCompatibleAudioDevice(ada, /*forceEnable=*/deviceState.isSAEnabled(), initState);
-            setHeadTrackerEnabled(deviceState.isHeadTrackerEnabled(), ada);
+            if (deviceState.hasHeadTracker()) {
+                applyHeadTrackerEnabled(deviceState.isHeadTrackerEnabled(), ada);
+            }
         } else {
             removeCompatibleAudioDevice(ada);
         }
@@ -1240,16 +1244,22 @@ public class SpatializerHelper {
         final AdiDeviceState deviceState = findSACompatibleDeviceStateForAudioDeviceAttributes(ada);
         if (deviceState == null) return;
         if (!deviceState.hasHeadTracker()) {
-            Log.e(TAG, "Called setHeadTrackerEnabled enabled:" + enabled
-                    + " device:" + ada + " on a device without headtracker");
+            // A device without a head tracker is already effectively disabled.
+            if (enabled) {
+                Log.e(TAG, "Called setHeadTrackerEnabled enabled:" + enabled
+                        + " device:" + ada + " on a device without headtracker");
+            }
             return;
         }
         Log.i(TAG, "setHeadTrackerEnabled enabled:" + enabled + " device:" + ada);
         deviceState.setHeadTrackerEnabled(enabled);
         mDeviceBroker.postPersistAudioDeviceSettings();
         logDeviceState(deviceState, "setHeadTrackerEnabled");
+        applyHeadTrackerEnabled(enabled, ada);
+    }
 
-        // check current routing to see if it affects the headtracking mode
+    @GuardedBy("this")
+    private void applyHeadTrackerEnabled(boolean enabled, @NonNull AudioDeviceAttributes ada) {
         if (sRoutingDevices.isEmpty()) {
             logloge("setHeadTrackerEnabled: no device, bailing");
             return;
